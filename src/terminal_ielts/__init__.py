@@ -1,0 +1,8 @@
+"""Terminal IELTS: a Textual reader and practice client."""
+
+from __future__ import annotations
+
+from .cli import main
+
+__all__ = ["main"]
+

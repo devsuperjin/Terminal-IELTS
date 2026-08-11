@@ -1,0 +1,8 @@
+.DS_Store
+.uv-cache/
+.venv/
+__pycache__/
+*.py[cod]
+dist/
+practice_history.jsonl
+
