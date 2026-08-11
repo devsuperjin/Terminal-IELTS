@@ -542,6 +542,19 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(restored_editor.answers["q7:0"], "breathing")
                 self.assertEqual(restored_editor.answers["q7:1"], "eating")
 
+    async def test_long_radio_labels_wrap_in_narrow_terminal(self) -> None:
+        bank = load_bank()
+        with tempfile.TemporaryDirectory() as directory:
+            app = IELTSApp(bank, Path(directory) / "state.json")
+            async with app.run_test(size=(80, 30)) as pilot:
+                await pilot.pause()
+                app.start_exam("p3-medium-22")
+                await pilot.pause()
+                radio_set = app.screen.query_one("#answer-13", RadioSet)
+                first_option = radio_set.query(RadioButton).first(RadioButton)
+                self.assertIn("bigger than originally thought", first_option.label.plain)
+                self.assertGreater(first_option.size.height, 1)
+
     async def test_saved_progress_hydrates_input_select_radio_and_checkbox(self) -> None:
         bank = load_bank()
         now = datetime.now().astimezone().isoformat(timespec="seconds")

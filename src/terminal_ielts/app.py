@@ -116,6 +116,20 @@ class PassageHighlight:
     parts: tuple[PassageHighlightPart, ...]
 
 
+class WrappingRadioButton(RadioButton):
+    """Radio button whose label grows vertically instead of being truncated."""
+
+    def get_content_height(self, container: Any, viewport: Any, width: int) -> int:
+        return Widget.get_content_height(self, container, viewport, width)
+
+
+class WrappingCheckbox(Checkbox):
+    """Checkbox whose label grows vertically instead of being truncated."""
+
+    def get_content_height(self, container: Any, viewport: Any, width: int) -> int:
+        return Widget.get_content_height(self, container, viewport, width)
+
+
 def selection_character_span(text: str, selection: Selection) -> tuple[int, int]:
     """Convert Textual's logical line/column selection to character offsets."""
     lines = text.splitlines(keepends=True) or [""]
@@ -948,12 +962,12 @@ class PracticeScreen(Screen[None]):
                                                 yield Static("Select one", classes="answer-hint")
                                                 with RadioSet(id=f"answer-{index}", classes="answer-control answer-radio"):
                                                     for option in question_option_items(question):
-                                                        yield RadioButton(option_display(option))
+                                                        yield WrappingRadioButton(option_display(option))
                                             elif is_multiple_selection(question) and question.get("options"):
                                                 yield Static("Select all required answers", classes="answer-hint")
                                                 with Vertical(id=f"answer-{index}", classes="answer-control answer-multi"):
                                                     for option_index, option in enumerate(question_option_items(question)):
-                                                        yield Checkbox(
+                                                        yield WrappingCheckbox(
                                                             option_display(option),
                                                             id=f"answer-{index}-option-{option_index}",
                                                             classes="multi-option",
@@ -1457,14 +1471,20 @@ class IELTSApp(App[None]):
     .answer-heading > SelectCurrent { border: tall $border-blurred; background: $panel; }
     .answer-radio { height: auto; background: transparent; margin-top: 1; padding: 0 1; border: tall $border-blurred; }
     .answer-radio:focus { border: tall $primary; background-tint: $primary 4%; }
-    .answer-radio RadioButton { color: $text-muted; background: transparent; }
+    .answer-radio RadioButton {
+        width: 1fr; height: auto; color: $text-muted; background: transparent;
+        text-wrap: wrap; text-overflow: fold;
+    }
     .answer-radio > RadioButton > .toggle--button { color: $text-muted; background: $panel; }
     .answer-radio > RadioButton.-on > .toggle--button { color: $foreground; background: $secondary-background; }
     .answer-radio:focus > RadioButton.-selected > .toggle--label {
         color: $foreground; background: $secondary-background; text-style: bold;
     }
     .answer-multi { height: auto; margin-top: 1; padding: 0 1; }
-    .answer-multi Checkbox { color: $text-muted; background: transparent; }
+    .answer-multi Checkbox {
+        width: 1fr; height: auto; color: $text-muted; background: transparent;
+        text-wrap: wrap; text-overflow: fold;
+    }
     .answer-multi Checkbox.-on > .toggle--button { color: $foreground; background: $secondary-background; }
     .completion-help { height: auto; color: $text-muted; margin: 0 0 1 0; }
     .completion-editor {
