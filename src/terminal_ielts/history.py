@@ -1,10 +1,15 @@
-"""Backward-compatible practice history loading and aggregate statistics."""
+"""Persistent practice data, legacy history loading, and aggregate statistics."""
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+
+STORE_SCHEMA_VERSION = 3
+DEFAULT_DATA_PATH = Path.home() / ".terminal_ielts.json"
 
 
 def _count(value: Any, *, maximum: int | None = None) -> int:
@@ -15,8 +20,101 @@ def _count(value: Any, *, maximum: int | None = None) -> int:
     return min(parsed, maximum) if maximum is not None else parsed
 
 
+def empty_practice_data() -> dict[str, Any]:
+    """Return a new empty single-file practice store."""
+    return {"schema_version": STORE_SCHEMA_VERSION, "attempts": [], "progress": {}}
+
+
+def _normalise_progress(progress: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(progress, dict):
+        return {}
+    cleaned: dict[str, dict[str, Any]] = {}
+    for key, value in progress.items():
+        if not isinstance(value, dict):
+            continue
+        exam_id = str(value.get("exam_id") or key)
+        if not exam_id:
+            continue
+        answers = value.get("answers") if isinstance(value.get("answers"), dict) else {}
+        slot_values = value.get("slot_values") if isinstance(value.get("slot_values"), dict) else {}
+        cleaned[exam_id] = {
+            "schema_version": _count(value.get("schema_version", 1)),
+            "exam_id": exam_id,
+            "started_at": value.get("started_at"),
+            "updated_at": value.get("updated_at"),
+            "elapsed_seconds": _count(value.get("elapsed_seconds")),
+            "answers": {str(question_id): str(answer) for question_id, answer in answers.items()},
+            "slot_values": {str(slot_id): str(answer) for slot_id, answer in slot_values.items()},
+            "bank_commit": str(value.get("bank_commit", "")),
+        }
+    return cleaned
+
+
+def load_practice_data(path: Path) -> dict[str, Any]:
+    """Load the v3 store, a legacy JSON object/list, or legacy JSONL rows."""
+    if not path.exists():
+        return empty_practice_data()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return empty_practice_data()
+    if not text.strip():
+        return empty_practice_data()
+
+    try:
+        value: Any = json.loads(text)
+    except json.JSONDecodeError:
+        value = None
+
+    attempts: list[dict[str, Any]] = []
+    progress: dict[str, dict[str, Any]] = {}
+    if isinstance(value, dict) and ("attempts" in value or "progress" in value):
+        raw_attempts = value.get("attempts", [])
+        if isinstance(raw_attempts, list):
+            attempts = [dict(record) for record in raw_attempts if isinstance(record, dict)]
+        progress = _normalise_progress(value.get("progress"))
+    elif isinstance(value, dict):
+        attempts = [dict(value)]
+    elif isinstance(value, list):
+        attempts = [dict(record) for record in value if isinstance(record, dict)]
+    else:
+        for line in text.splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                attempts.append(dict(record))
+
+    return {
+        "schema_version": STORE_SCHEMA_VERSION,
+        "attempts": attempts,
+        "progress": progress,
+    }
+
+
+def write_practice_data(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write the single-file store with user-only permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": STORE_SCHEMA_VERSION,
+        "attempts": [
+            dict(record) for record in data.get("attempts", []) if isinstance(record, dict)
+        ],
+        "progress": _normalise_progress(data.get("progress")),
+    }
+    temporary = path.with_name(f"{path.name}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
 def normalise_history_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Normalise both legacy rows and schema-v2 timed attempts."""
+    """Normalise legacy rows and timed attempt records."""
     answers = record.get("answers") if isinstance(record.get("answers"), dict) else {}
     total = _count(record.get("total"))
     correct = _count(record.get("correct"), maximum=total)
@@ -24,10 +122,17 @@ def normalise_history_record(record: dict[str, Any]) -> dict[str, Any]:
     attempted = _count(record.get("attempted", attempted_fallback), maximum=total)
     duration_raw = record.get("duration_seconds")
     duration = None if duration_raw is None else _count(duration_raw)
+    question_results = (
+        [dict(result) for result in record["question_results"] if isinstance(result, dict)]
+        if isinstance(record.get("question_results"), list)
+        else []
+    )
     return {
         "schema_version": _count(record.get("schema_version", 1)),
         "exam_id": str(record.get("exam_id", "")),
         "title": str(record.get("title", "")),
+        "category": str(record.get("category", "")),
+        "frequency": str(record.get("frequency", "")),
         "started_at": record.get("started_at"),
         "completed_at": record.get("completed_at"),
         "duration_seconds": duration,
@@ -35,23 +140,15 @@ def normalise_history_record(record: dict[str, Any]) -> dict[str, Any]:
         "correct": correct,
         "total": total,
         "accuracy": correct / total if total else 0.0,
-        "answers": dict(answers),
+        "answers": {str(question_id): str(answer) for question_id, answer in answers.items()},
+        "question_results": question_results,
     }
 
 
 def read_history(path: Path) -> list[dict[str, Any]]:
-    """Read JSONL history, ignoring malformed or non-object rows."""
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            records.append(normalise_history_record(value))
-    return records
+    """Read attempts from the v3 store or any supported legacy format."""
+    data = load_practice_data(path)
+    return [normalise_history_record(record) for record in data["attempts"]]
 
 
 def aggregate_history(records: list[dict[str, Any]]) -> dict[str, Any]:

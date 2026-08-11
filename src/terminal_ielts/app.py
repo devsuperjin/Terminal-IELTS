@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,9 +14,14 @@ from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.content import Content, Span
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.message import Message
+from textual.selection import Selection
+from textual.style import Style
+from textual.theme import Theme
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import (
     Button,
@@ -30,8 +36,81 @@ from textual.widgets import (
     Select,
     Static,
 )
+from textual.widgets._markdown import MarkdownBlock
 
 from .bank import answer_is_correct
+from .history import DEFAULT_DATA_PATH, load_practice_data, write_practice_data
+
+
+UBUNTU_GNOME_THEME = Theme(
+    name="ubuntu-gnome",
+    primary="#E95420",
+    secondary="#77216F",
+    accent="#E95420",
+    warning="#C4A000",
+    error="#CC0000",
+    success="#4E9A06",
+    foreground="#EEEEEC",
+    background="#300A24",
+    surface="#3A102D",
+    panel="#451438",
+    dark=True,
+    luminosity_spread=0.1,
+    variables={
+        "border": "#5E2750",
+        "border-blurred": "#451438",
+        "footer-background": "#2C001E",
+        "footer-key-foreground": "#E95420",
+        "scrollbar": "#5E2750",
+        "scrollbar-hover": "#77216F",
+        "scrollbar-active": "#E95420",
+        "scrollbar-background": "#2C001E",
+        "scrollbar-background-hover": "#2C001E",
+        "scrollbar-background-active": "#2C001E",
+        "scrollbar-corner-color": "#2C001E",
+        "input-selection-background": "#E95420 35%",
+        "screen-selection-background": "#5E2750",
+        "screen-selection-foreground": "#EEEEEC",
+        "block-cursor-background": "#E95420",
+        "block-cursor-foreground": "#FFFFFF",
+        "markdown-h1-color": "#D3D7CF",
+        "markdown-h2-color": "#D3D7CF",
+        "markdown-h3-color": "#AEA79F",
+        "markdown-h4-color": "#D3D7CF",
+    },
+)
+
+
+@dataclass(frozen=True)
+class PassageHighlightPart:
+    block: MarkdownBlock
+    start: int
+    end: int
+    quote: str
+
+
+@dataclass(frozen=True)
+class PassageHighlight:
+    id: str
+    parts: tuple[PassageHighlightPart, ...]
+
+
+def selection_character_span(text: str, selection: Selection) -> tuple[int, int]:
+    """Convert Textual's logical line/column selection to character offsets."""
+    lines = text.splitlines(keepends=True) or [""]
+
+    def offset_to_index(offset: Any, default: int) -> int:
+        if offset is None:
+            return default
+        line_index = max(0, min(int(offset.y), len(lines) - 1))
+        line = lines[line_index]
+        content_length = len(line.rstrip("\r\n"))
+        column = max(0, min(int(offset.x), content_length))
+        return sum(len(previous) for previous in lines[:line_index]) + column
+
+    start = offset_to_index(selection.start, 0)
+    end = offset_to_index(selection.end, len(text))
+    return (start, end) if start <= end else (end, start)
 
 
 def question_is_correct(question: dict[str, Any], user_answer: str) -> bool:
@@ -291,11 +370,11 @@ class CompletionEditor(Container):
                 is_active = slot_id == self.active_slot_id
                 input_widget = self.query_one(CompletionInput) if self.is_mounted else None
                 if is_active and input_widget is not None and input_widget.has_focus:
-                    rendered.append(label, style="bold reverse #c0c3c5 on #3a3d40")
+                    rendered.append(label, style="bold #EEEEEC on #5E2750")
                 elif answer:
-                    rendered.append(label, style="underline #b6babd")
+                    rendered.append(label, style="underline #D3D7CF")
                 else:
-                    rendered.append(label, style="underline #747a7f")
+                    rendered.append(label, style="underline #AEA79F")
             cursor = match.end()
         rendered.append(self.template[cursor:])
         return rendered
@@ -441,11 +520,11 @@ class InlineSelectEditor(Container):
                 shown = answer if answer else "________"
                 label = f" {self.numbers[slot_id]}: {shown} "
                 if slot_id == self.active_slot_id:
-                    rendered.append(label, style="bold reverse #c0c3c5 on #3a3d40")
+                    rendered.append(label, style="bold #EEEEEC on #5E2750")
                 elif answer:
-                    rendered.append(label, style="underline #b6babd")
+                    rendered.append(label, style="underline #D3D7CF")
                 else:
-                    rendered.append(label, style="underline #747a7f")
+                    rendered.append(label, style="underline #AEA79F")
             cursor = match.end()
         rendered.append(self.template[cursor:])
         return rendered
@@ -569,9 +648,14 @@ class LibraryScreen(Screen[None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#exam-table", DataTable)
-        table.add_columns("Part", "Frequency", "Passage", "Questions")
+        table.add_columns("Done", "Part", "Frequency", "Passage", "Questions")
         self.apply_filters()
         table.focus()
+
+    def on_screen_resume(self) -> None:
+        """Refresh completion marks after returning from a submitted practice."""
+        if self.is_mounted:
+            self.apply_filters()
 
     def apply_filters(self) -> None:
         search = self.query_one("#search", Input).value.casefold().strip()
@@ -588,6 +672,7 @@ class LibraryScreen(Screen[None]):
         table.clear()
         for exam in self.filtered:
             table.add_row(
+                "✓" if exam["exam_id"] in self.app.completed_exam_ids else "",
                 exam["category"],
                 exam["frequency"].title(),
                 exam["title"],
@@ -595,7 +680,8 @@ class LibraryScreen(Screen[None]):
                 key=exam["exam_id"],
             )
         self.query_one("#library-help", Static).update(
-            f"{len(self.filtered)} shown  ·  ↑↓ select  ·  Enter practice  ·  / search  ·  R random"
+            f"{len(self.filtered)} shown  ·  {len(self.app.completed_exam_ids)} practiced ✓  ·  "
+            "↑↓ select  ·  Enter practice  ·  / search  ·  R random"
         )
 
     @on(Input.Changed, "#search")
@@ -625,23 +711,56 @@ class LibraryScreen(Screen[None]):
 
 
 class PracticeScreen(Screen[None]):
+    NARROW_WORKSPACE_WIDTH = 120
+
     BINDINGS = [
+        Binding("f2", "toggle_pane", "Switch view"),
         Binding("ctrl+up", "previous_answer", "Previous answer"),
         Binding("ctrl+down", "next_answer", "Next answer"),
         Binding("ctrl+s", "submit_exam", "Submit"),
         Binding("escape", "library", "Library"),
     ]
 
-    def __init__(self, exam: dict[str, Any]) -> None:
+    def __init__(self, exam: dict[str, Any], saved_progress: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.exam = exam
-        self.answers: dict[str, str] = {}
-        self.started_at = datetime.now().astimezone()
+        self.saved_progress = saved_progress or {}
+        valid_question_ids = {str(question["id"]) for question in exam["questions"]}
+        saved_answers = (
+            self.saved_progress.get("answers")
+            if isinstance(self.saved_progress.get("answers"), dict)
+            else {}
+        )
+        self.answers: dict[str, str] = {
+            str(question_id): str(answer)
+            for question_id, answer in saved_answers.items()
+            if str(question_id) in valid_question_ids
+        }
+        try:
+            started_at = datetime.fromisoformat(str(self.saved_progress.get("started_at", "")))
+            self.started_at = started_at.astimezone()
+        except (TypeError, ValueError):
+            self.started_at = datetime.now().astimezone()
+        try:
+            self.elapsed_before_resume = max(0, int(self.saved_progress.get("elapsed_seconds", 0)))
+        except (TypeError, ValueError):
+            self.elapsed_before_resume = 0
         self.started_monotonic = time.monotonic()
         self._submitted = False
+        self._frozen_duration_seconds: int | None = None
+        self._clock_timer: Timer | None = None
+        self._progress_save_timer: Timer | None = None
+        self._last_persisted_elapsed = self.elapsed_before_resume
+        self._restoring_progress = True
+        self._narrow_mode = False
+        self._narrow_pane = "passage"
+        self._last_answer_index = 0
+        self.article_highlights: list[PassageHighlight] = []
+        self._article_base_content: dict[MarkdownBlock, Content] = {}
+        self._next_highlight_id = 1
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield Header(show_clock=False)
         with Vertical(id="practice"):
             with Horizontal(id="practice-topbar"):
                 with Vertical():
@@ -651,6 +770,20 @@ class PracticeScreen(Screen[None]):
             with Horizontal(id="workspace"):
                 with Vertical(classes="pane", id="passage-pane"):
                     yield Static("READING PASSAGE", classes="pane-title")
+                    with Horizontal(id="passage-tools"):
+                        yield Static("Drag over passage text to highlight", id="highlight-help")
+                        yield Button(
+                            "Undo highlight",
+                            id="undo-highlight",
+                            classes="highlight-action",
+                            disabled=True,
+                        )
+                        yield Button(
+                            "Clear",
+                            id="clear-highlights",
+                            classes="highlight-action",
+                            disabled=True,
+                        )
                     with VerticalScroll(id="passage-scroll"):
                         yield Markdown(self.exam["passage"], id="passage")
                 with Vertical(classes="pane", id="question-pane"):
@@ -763,9 +896,178 @@ class PracticeScreen(Screen[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        first_answer = self.query(".answer-control").first(Widget)
-        self.focus_control(first_answer)
-        self.update_progress()
+        self.restore_saved_answers()
+        self._update_workspace_layout(self.size.width)
+        if self._narrow_mode:
+            self.set_focus(None)
+        else:
+            controls = list(self.query(".answer-control"))
+            if controls:
+                self.focus_control(controls[self._last_answer_index])
+        self.refresh_practice_status()
+        self._clock_timer = self.set_interval(1.0, self.update_clock, name="practice-elapsed-clock")
+        self.call_after_refresh(self.finish_progress_restore)
+
+    def finish_progress_restore(self) -> None:
+        self._restoring_progress = False
+        self.persist_progress()
+
+    def on_unmount(self) -> None:
+        self.stop_timers()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._update_workspace_layout(event.size.width)
+
+    def _update_workspace_layout(self, width: int) -> None:
+        """Use one switchable full-width pane when two readable columns no longer fit."""
+        was_narrow = self._narrow_mode
+        self._narrow_mode = width < self.NARROW_WORKSPACE_WIDTH
+        self.set_class(self._narrow_mode, "narrow-workspace")
+        if not self.is_mounted:
+            return
+        if was_narrow == self._narrow_mode:
+            return
+        if self._narrow_mode and self._narrow_pane == "passage":
+            self._last_answer_index = self.focused_answer_index()
+        self._apply_pane_visibility()
+        self.refresh_bindings()
+
+    def _apply_pane_visibility(self) -> None:
+        passage_pane = self.query_one("#passage-pane", Vertical)
+        question_pane = self.query_one("#question-pane", Vertical)
+        show_passage = self._narrow_pane == "passage"
+        passage_pane.display = not self._narrow_mode or show_passage
+        question_pane.display = not self._narrow_mode or not show_passage
+        self.refresh(layout=True)
+
+    def show_narrow_pane(self, pane: str, *, focus_content: bool = True) -> None:
+        if pane not in {"passage", "questions"}:
+            raise ValueError(f"Unknown practice pane: {pane}")
+        if pane == "passage":
+            self._last_answer_index = self.focused_answer_index()
+            self.persist_progress()
+        self._narrow_pane = pane
+        self._apply_pane_visibility()
+        if not self._narrow_mode or not focus_content:
+            return
+        if pane == "passage":
+            self.set_focus(None)
+        else:
+            controls = list(self.query(".answer-control"))
+            if controls:
+                answer = controls[max(0, min(self._last_answer_index, len(controls) - 1))]
+                self.call_after_refresh(self.focus_control, answer)
+
+    def action_toggle_pane(self) -> None:
+        if not self._narrow_mode:
+            return
+        next_pane = "questions" if self._narrow_pane == "passage" else "passage"
+        self.show_narrow_pane(next_pane)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "toggle_pane":
+            return self._narrow_mode
+        return super().check_action(action, parameters)
+
+    @on(events.TextSelected)
+    def passage_text_selected(self) -> None:
+        """Turn the native drag selection inside the passage into persistent spans."""
+        if not self.selections:
+            return
+        passage = self.query_one("#passage", Markdown)
+        if any(
+            widget is not passage and passage not in widget.ancestors
+            for widget in self.selections
+        ):
+            self.clear_selection()
+            return
+
+        parts: list[PassageHighlightPart] = []
+        for widget, selection in self.selections.items():
+            if not isinstance(widget, MarkdownBlock):
+                continue
+            base_content = self._article_base_content.get(widget)
+            if base_content is None:
+                content = widget.content
+                if not isinstance(content, Content):
+                    continue
+                base_content = content
+                self._article_base_content[widget] = base_content
+            start, end = selection_character_span(base_content.plain, selection)
+            quote = base_content.plain[start:end]
+            if quote.strip():
+                parts.append(PassageHighlightPart(widget, start, end, quote))
+
+        self.clear_selection()
+        if not parts:
+            return
+        highlight = PassageHighlight(
+            id=f"highlight-{self._next_highlight_id}",
+            parts=tuple(parts),
+        )
+        self._next_highlight_id += 1
+        self.article_highlights.append(highlight)
+        self._render_article_highlights()
+
+    @on(events.Click)
+    def remove_clicked_article_highlight(self, event: events.Click) -> None:
+        """Clicking a persistent highlight removes that complete drag selection."""
+        highlight_id = event.style.meta.get("highlight_id")
+        if highlight_id is None:
+            return
+        self.remove_article_highlight(str(highlight_id))
+        event.stop()
+
+    def _render_article_highlights(self) -> None:
+        spans_by_block: dict[MarkdownBlock, list[Span]] = {
+            block: [] for block in self._article_base_content
+        }
+        for highlight in self.article_highlights:
+            highlight_style = Style.parse("on #5E2750") + Style.from_meta(
+                {"highlight_id": highlight.id}
+            )
+            for part in highlight.parts:
+                spans_by_block.setdefault(part.block, []).append(
+                    Span(part.start, part.end, highlight_style)
+                )
+        for block, base_content in self._article_base_content.items():
+            spans = spans_by_block.get(block, [])
+            block.set_content(base_content.add_spans(spans) if spans else base_content)
+        self._update_highlight_controls()
+
+    def _update_highlight_controls(self) -> None:
+        count = len(self.article_highlights)
+        status = "Drag over passage text to highlight"
+        if count:
+            status += f"  ·  {count} saved"
+        self.query_one("#highlight-help", Static).update(status)
+        self.query_one("#undo-highlight", Button).disabled = count == 0
+        self.query_one("#clear-highlights", Button).disabled = count == 0
+
+    def remove_article_highlight(self, highlight_id: str) -> None:
+        remaining = [
+            highlight
+            for highlight in self.article_highlights
+            if highlight.id != highlight_id
+        ]
+        if len(remaining) == len(self.article_highlights):
+            return
+        self.article_highlights = remaining
+        self._render_article_highlights()
+
+    def undo_article_highlight(self) -> None:
+        if not self.article_highlights:
+            return
+        self.article_highlights.pop()
+        self._render_article_highlights()
+
+    def clear_article_highlights(self) -> None:
+        if not self.article_highlights:
+            self.clear_selection()
+            return
+        self.article_highlights.clear()
+        self.clear_selection()
+        self._render_article_highlights()
 
     def focus_control(self, control: Widget) -> None:
         if isinstance(control, CompletionEditor):
@@ -778,6 +1080,135 @@ class PracticeScreen(Screen[None]):
             focusable = next((widget for widget in control.query("*") if widget.can_focus), None)
             if focusable is not None:
                 focusable.focus()
+
+    def restore_saved_answers(self) -> None:
+        """Hydrate every native control, including occurrence-level inline slots."""
+        slot_values = (
+            self.saved_progress.get("slot_values")
+            if isinstance(self.saved_progress.get("slot_values"), dict)
+            else {}
+        )
+        inline_question_ids: set[str] = set()
+        for editor in self.query(CompletionEditor):
+            slots_by_question: dict[str, list[str]] = {}
+            for slot_id in editor.field_ids:
+                question_id = str(editor.slot_by_id[slot_id]["question_id"])
+                slots_by_question.setdefault(question_id, []).append(slot_id)
+                inline_question_ids.add(question_id)
+            for question_id, slot_ids in slots_by_question.items():
+                flattened = self.answers.get(question_id, "")
+                fallback_parts = re.split(r"\s+/\s+", flattened, maxsplit=len(slot_ids) - 1)
+                for occurrence, slot_id in enumerate(slot_ids):
+                    if slot_id in slot_values:
+                        editor.answers[slot_id] = str(slot_values[slot_id])
+                    elif occurrence < len(fallback_parts):
+                        editor.answers[slot_id] = fallback_parts[occurrence]
+            editor.sync_input()
+
+        for editor in self.query(InlineSelectEditor):
+            for slot_id in editor.field_ids:
+                question_id = str(editor.slot_by_id[slot_id]["question_id"])
+                inline_question_ids.add(question_id)
+                value = str(slot_values.get(slot_id, self.answers.get(question_id, "")))
+                if value in editor.label_by_value:
+                    editor.answers[slot_id] = value
+            editor.sync_select()
+
+        for index, question in enumerate(self.exam["questions"]):
+            question_id = str(question["id"])
+            if question_id in inline_question_ids or question_id not in self.answers:
+                continue
+            value = self.answers[question_id]
+            control = self.query_one(f"#answer-{index}")
+            if isinstance(control, Input):
+                control.value = value
+            elif isinstance(control, Select):
+                if value in control._legal_values:
+                    control.value = value
+            elif isinstance(control, RadioSet):
+                option_index = next(
+                    (
+                        option_index
+                        for option_index, option in enumerate(question.get("options", []))
+                        if str(option).casefold() == value.casefold()
+                    ),
+                    -1,
+                )
+                if option_index >= 0:
+                    control.query(RadioButton)[option_index].value = True
+            else:
+                selected = {
+                    part.strip().casefold()
+                    for part in re.split(r"\s*/\s*", value)
+                    if part.strip()
+                }
+                for option_index, checkbox in enumerate(control.query(Checkbox)):
+                    checkbox.value = str(question["options"][option_index]).casefold() in selected
+
+    def slot_values(self) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for editor in self.query(CompletionEditor):
+            values.update(editor.answers)
+        for editor in self.query(InlineSelectEditor):
+            values.update(editor.answers)
+        return values
+
+    def elapsed_seconds(self) -> int:
+        if self._frozen_duration_seconds is not None:
+            return self._frozen_duration_seconds
+        return self.elapsed_before_resume + max(0, int(time.monotonic() - self.started_monotonic))
+
+    def refresh_practice_status(self) -> None:
+        elapsed = self.elapsed_seconds()
+        minutes, seconds = divmod(elapsed, 60)
+        answered = sum(bool(value.strip()) for value in self.answers.values())
+        self.query_one("#progress", Static).update(
+            f"{minutes:02d}:{seconds:02d}  ·  {answered:02d} / "
+            f"{len(self.exam['questions']):02d} answered"
+        )
+
+    def update_clock(self) -> None:
+        if self._submitted:
+            return
+        self.refresh_practice_status()
+        if self.elapsed_seconds() - self._last_persisted_elapsed >= 10:
+            self.persist_progress()
+
+    def stop_timers(self) -> None:
+        if self._clock_timer is not None:
+            self._clock_timer.stop()
+            self._clock_timer = None
+        if self._progress_save_timer is not None:
+            self._progress_save_timer.stop()
+            self._progress_save_timer = None
+
+    def schedule_progress_save(self) -> None:
+        if self._restoring_progress or self._submitted:
+            return
+        if self._progress_save_timer is not None:
+            self._progress_save_timer.stop()
+        self._progress_save_timer = self.set_timer(
+            0.4,
+            self.persist_progress,
+            name="practice-progress-save",
+        )
+
+    def persist_progress(self) -> None:
+        if self._restoring_progress or self._submitted or not self.is_mounted:
+            return
+        if self._progress_save_timer is not None:
+            self._progress_save_timer.stop()
+            self._progress_save_timer = None
+        self.save_answers()
+        elapsed = self.elapsed_seconds()
+        if self.app.save_progress(
+            self.exam,
+            self.answers,
+            self.slot_values(),
+            self.started_at,
+            elapsed,
+        ):
+            self._last_persisted_elapsed = elapsed
 
     def save_answers(self) -> None:
         inline_question_ids: set[str] = set()
@@ -809,10 +1240,8 @@ class PracticeScreen(Screen[None]):
 
     def update_progress(self) -> None:
         self.save_answers()
-        self.query_one("#progress", Static).update(
-            f"{len([value for value in self.answers.values() if value.strip()]):02d} / "
-            f"{len(self.exam['questions']):02d} answered"
-        )
+        self.refresh_practice_status()
+        self.schedule_progress_save()
 
     def focused_answer_index(self) -> int:
         focused = self.focused
@@ -822,6 +1251,8 @@ class PracticeScreen(Screen[None]):
         return 0
 
     def focus_answer(self, index: int) -> None:
+        if self._narrow_mode and self._narrow_pane != "questions":
+            self.show_narrow_pane("questions", focus_content=False)
         controls = list(self.query(".answer-control"))
         bounded = max(0, min(index, len(controls) - 1))
         self.focus_control(controls[bounded])
@@ -837,13 +1268,23 @@ class PracticeScreen(Screen[None]):
             self.notify("This attempt has already been saved", severity="warning")
             return
         self.save_answers()
-        duration_seconds = max(0, round(time.monotonic() - self.started_monotonic))
+        duration_seconds = self.elapsed_seconds()
+        if not self.app.record_attempt(
+            self.exam,
+            self.answers,
+            self.started_at,
+            duration_seconds,
+        ):
+            self.persist_progress()
+            return
+        self._frozen_duration_seconds = duration_seconds
         self._submitted = True
-        self.app.record_attempt(self.exam, self.answers, self.started_at, duration_seconds)
+        self.stop_timers()
+        self.refresh_practice_status()
         self.app.push_screen(ResultScreen(self.exam, self.answers, duration_seconds))
 
     def action_library(self) -> None:
-        self.save_answers()
+        self.persist_progress()
         self.app.pop_screen()
 
     @on(Input.Changed, ".answer-input")
@@ -867,6 +1308,8 @@ class PracticeScreen(Screen[None]):
         actions = {
             "submit": self.action_submit_exam,
             "library-button": self.action_library,
+            "undo-highlight": self.undo_article_highlight,
+            "clear-highlights": self.clear_article_highlights,
         }
         if event.button.id in actions:
             actions[event.button.id]()
@@ -879,105 +1322,174 @@ class IELTSApp(App[None]):
     SUB_TITLE = "Reading practice"
     CSS = """
     Screen {
-        background: #151718; color: #b7bcc2;
-        scrollbar-color: #3d4246; scrollbar-color-hover: #4c5256;
-        scrollbar-color-active: #5a6065; scrollbar-background: #151718;
+        background: $background; color: $foreground;
+        scrollbar-color: $scrollbar; scrollbar-color-hover: $scrollbar-hover;
+        scrollbar-color-active: $scrollbar-active; scrollbar-background: $scrollbar-background;
     }
-    Header { background: #191b1d; color: #858b90; }
-    Footer { background: #191b1d; color: #747a7f; }
+    Header { background: $background-darken-1; color: $text-muted; }
+    Footer { background: $footer-background; color: $text-muted; }
     #library { padding: 2 4; }
-    .eyebrow { color: #777e84; text-style: bold; height: 1; }
-    #library-title { color: #c2c6c9; text-style: bold; height: 3; padding-top: 1; }
-    #library-stats { color: #747a7f; height: 2; }
+    .eyebrow { color: $text-muted; text-style: bold; height: 1; }
+    #library-title { color: $foreground; text-style: bold; height: 3; padding-top: 1; }
+    #library-stats { color: $text-muted; height: 2; }
     #filters { height: 3; margin: 1 0; }
-    #search { width: 1fr; margin-right: 1; border: tall #35383b; }
+    #search { width: 1fr; margin-right: 1; border: tall $border-blurred; }
     #category { width: 18; margin-right: 1; }
     #frequency { width: 22; }
-    #exam-table { height: 1fr; border: round #303336; background: #191b1d; }
-    #exam-table > .datatable--header { background: #292c2e; color: #b5b9bc; text-style: bold; }
-    #exam-table > .datatable--cursor { background: #35383b; color: #d0d2d4; }
-    #library-help { height: 2; padding-top: 1; color: #666b6f; text-align: center; }
+    #exam-table { height: 1fr; border: round $border-blurred; background: $surface; }
+    #exam-table > .datatable--header { background: $panel; color: $text-muted; text-style: bold; }
+    #exam-table > .datatable--cursor { background: $secondary-background; color: $foreground; }
+    #library-help { height: 2; padding-top: 1; color: $text-muted; text-align: center; }
     #practice { padding: 1 2; }
     #practice-topbar { height: 4; padding: 0 1; }
-    #exam-title { color: #c7c9cb; text-style: bold; height: 2; }
-    #progress { width: 28; text-align: right; color: #858a8e; padding-top: 1; }
+    #exam-title { color: $foreground; text-style: bold; height: 2; }
+    #progress { width: 28; text-align: right; color: $text-muted; padding-top: 1; }
     #workspace { height: 1fr; }
-    .pane { background: #191b1d; border: round #303336; margin: 0 1; padding: 0 1; }
+    .pane { background: $background-darken-1; border: round $border-blurred; margin: 0 1; padding: 0 1; }
     #passage-pane { width: 58%; }
     #question-pane { width: 42%; }
-    .pane-title { color: #858b90; text-style: bold; height: 2; padding: 1 1 0 1; }
-    #passage-scroll { background: #1d1f21; color: #b7bbbe; margin: 0 1 1 1; }
-    #passage { padding: 1 4 3 4; color: #b7bbbe; }
+    .pane-title { color: $text-muted; text-style: bold; height: 2; padding: 1 1 0 1; }
+    #passage-tools { height: 3; margin: 0 1; }
+    #highlight-help { width: 1fr; height: 3; padding: 1; color: $text-muted; }
+    #passage-tools .highlight-action { min-width: 9; margin-left: 1; }
+    #passage-scroll { background: $surface; color: $foreground; margin: 0 1 1 1; }
+    #passage { padding: 1 4 3 4; color: $foreground; }
     #passage MarkdownH1, #passage MarkdownH2, #passage MarkdownH3, #passage MarkdownH4 {
-        color: #c5c8ca; text-style: bold; margin: 1 0;
+        color: $foreground; text-style: bold; margin: 1 0;
     }
     #passage MarkdownParagraph { margin: 0 0 1 0; }
     #question-scroll { padding: 0 1 1 1; }
     .question-group { height: auto; margin-bottom: 2; }
-    .group-title { height: auto; min-height: 1; color: #8e9498; text-style: bold; margin: 1 0; }
-    .group-instructions { height: auto; color: #aeb2b5; background: #202224; padding: 1 2; margin-bottom: 1; }
-    .question-card { height: auto; border-left: thick #3b3f42; background: #1d1f21; padding: 1 2; margin-bottom: 1; }
-    .question-copy { height: auto; color: #c0c3c5; }
-    .question-copy MarkdownH3 { color: #8e9498; background: transparent; text-style: bold; }
-    .answer-hint { color: #777d81; height: auto; min-height: 1; margin-top: 1; }
-    .answer-input { margin-top: 1; border: tall #393d40; }
-    .answer-heading { margin-top: 1; color: #aeb2b5; background: #202224; }
-    .answer-heading > SelectCurrent { border: tall #393d40; background: #202224; }
-    .answer-radio { height: auto; background: transparent; margin-top: 1; padding: 0 1; border: tall #393d40; }
-    .answer-radio:focus { border: tall #565b5f; background-tint: #ffffff 2%; }
-    .answer-radio RadioButton { color: #aeb2b5; background: transparent; }
-    .answer-radio > RadioButton > .toggle--button { color: #666c70; background: #25282a; }
-    .answer-radio > RadioButton.-on > .toggle--button { color: #c0c3c5; background: #25282a; }
+    .group-title { height: auto; min-height: 1; color: $text-secondary; text-style: bold; margin: 1 0; }
+    .group-instructions { height: auto; color: $text-muted; background: $panel; padding: 1 2; margin-bottom: 1; }
+    .question-card { height: auto; border-left: thick $border; background: $surface; padding: 1 2; margin-bottom: 1; }
+    .question-copy { height: auto; color: $foreground; }
+    .question-copy MarkdownH3 { color: $text-secondary; background: transparent; text-style: bold; }
+    .answer-hint { color: $text-muted; height: auto; min-height: 1; margin-top: 1; }
+    .answer-input { margin-top: 1; border: tall $border-blurred; }
+    .answer-heading { margin-top: 1; color: $text-muted; background: $panel; }
+    .answer-heading > SelectCurrent { border: tall $border-blurred; background: $panel; }
+    .answer-radio { height: auto; background: transparent; margin-top: 1; padding: 0 1; border: tall $border-blurred; }
+    .answer-radio:focus { border: tall $primary; background-tint: $primary 4%; }
+    .answer-radio RadioButton { color: $text-muted; background: transparent; }
+    .answer-radio > RadioButton > .toggle--button { color: $text-muted; background: $panel; }
+    .answer-radio > RadioButton.-on > .toggle--button { color: $foreground; background: $secondary-background; }
     .answer-radio:focus > RadioButton.-selected > .toggle--label {
-        color: #c4c7c9; background: #303336; text-style: bold;
+        color: $foreground; background: $secondary-background; text-style: bold;
     }
     .answer-multi { height: auto; margin-top: 1; padding: 0 1; }
-    .answer-multi Checkbox { color: #aeb2b5; background: transparent; }
-    .answer-multi Checkbox.-on > .toggle--button { color: #c0c3c5; background: #25282a; }
-    .completion-help { height: auto; color: #747a7f; margin: 0 0 1 0; }
+    .answer-multi Checkbox { color: $text-muted; background: transparent; }
+    .answer-multi Checkbox.-on > .toggle--button { color: $foreground; background: $secondary-background; }
+    .completion-help { height: auto; color: $text-muted; margin: 0 0 1 0; }
     .completion-editor {
-        height: auto; min-height: 5; color: #b9bdc0; background: #1d1f21;
-        border: round #3b3f42; padding: 1 2; margin-bottom: 1;
+        height: auto; min-height: 5; color: $foreground; background: $surface;
+        border: round $border-blurred; padding: 1 2; margin-bottom: 1;
     }
-    .completion-editor:focus-within { border: round #5a6065; background: #202224; }
-    .completion-text { height: auto; color: #b9bdc0; }
+    .completion-editor:focus-within { border: round $primary; background: $panel; }
+    .completion-text { height: auto; color: $foreground; }
     .completion-entry { height: 3; margin-top: 1; }
-    .completion-label { width: 14; height: 3; padding: 1 1; color: #858b90; }
-    .completion-native-input { width: 1fr; border: tall #45494d; }
-    .completion-native-input:focus { border: tall #5a6065; }
-    .completion-native-select { width: 1fr; color: #aeb2b5; background: #202224; }
-    .completion-native-select > SelectCurrent { border: tall #45494d; background: #202224; }
+    .completion-label { width: 14; height: 3; padding: 1 1; color: $text-muted; }
+    .completion-native-input { width: 1fr; border: tall $border; }
+    .completion-native-input:focus { border: tall $primary; }
+    .completion-native-select { width: 1fr; color: $text-muted; background: $panel; }
+    .completion-native-select > SelectCurrent { border: tall $border; background: $panel; }
     .answer-select:focus > SelectCurrent, .completion-native-select:focus > SelectCurrent {
-        border: tall #5a6065; background-tint: #ffffff 2%;
+        border: tall $primary; background-tint: $primary 4%;
     }
     .answer-select > SelectOverlay > .option-list--option-highlighted,
     .completion-native-select > SelectOverlay > .option-list--option-highlighted {
-        color: #c4c7c9; background: #34383b; text-style: bold;
+        color: $foreground; background: $secondary-background; text-style: bold;
     }
-    .answer-input:focus, #search:focus { border: tall #5a6065; }
+    .answer-input:focus, #search:focus { border: tall $primary; }
     #question-actions { height: 3; margin: 0 1 1 1; }
     #question-actions Button { margin-right: 1; min-width: 18; }
-    Button { background: #292c2e; color: #b8bbbd; border: tall #3a3e41; }
-    Button:hover { background: #34383b; }
-    Button:focus { background: #34383b; color: #c5c8ca; border: tall #565b5f; }
-    ResultScreen { align: center middle; background: #101112 75%; }
-    #result-card { width: 72; height: 30; padding: 2 3; border: round #44494d; background: #1b1d1f; }
-    #score { height: 4; padding-top: 1; color: #bfc2c4; text-style: bold; text-align: center; }
-    #corrections { height: 1fr; margin: 1 0; border: round #35393c; padding: 1; }
+    PracticeScreen.narrow-workspace #practice { padding: 1; }
+    PracticeScreen.narrow-workspace #workspace {
+        layout: horizontal; overflow-x: hidden; overflow-y: hidden;
+    }
+    PracticeScreen.narrow-workspace .pane {
+        width: 100%; height: 1fr; min-height: 8; margin: 0;
+    }
+    PracticeScreen.narrow-workspace #passage-pane,
+    PracticeScreen.narrow-workspace #question-pane { width: 100%; }
+    PracticeScreen.narrow-workspace #passage { padding: 1 2 3 2; }
+    Button { background: $panel; color: $foreground; border: tall $border; }
+    Button:hover { background: $secondary-background; }
+    Button:focus { background: $secondary-background; color: $foreground; border: tall $primary; }
+    ResultScreen { align: center middle; background: $background-darken-2 78%; }
+    #result-card { width: 72; height: 30; padding: 2 3; border: round $border; background: $surface; }
+    #score { height: 4; padding-top: 1; color: $foreground; text-style: bold; text-align: center; }
+    #corrections { height: 1fr; margin: 1 0; border: round $border-blurred; padding: 1; }
     #close-result { width: 100%; }
     """
 
     def __init__(self, bank: dict[str, Any], history_path: Path | None = None) -> None:
         super().__init__()
+        self.register_theme(UBUNTU_GNOME_THEME)
+        self.theme = UBUNTU_GNOME_THEME.name
         self.bank = bank
         self.exam_by_id = {exam["exam_id"]: exam for exam in bank["exams"]}
-        self.history_path = history_path or Path.cwd() / "practice_history.jsonl"
+        self.data_path = history_path or DEFAULT_DATA_PATH
+        self.history_path = self.data_path
+        if history_path is None and not self.data_path.exists():
+            legacy_path = Path.cwd() / "practice_history.jsonl"
+            self.practice_data = (
+                load_practice_data(legacy_path)
+                if legacy_path.exists()
+                else load_practice_data(self.data_path)
+            )
+        else:
+            self.practice_data = load_practice_data(self.data_path)
+
+    @property
+    def completed_exam_ids(self) -> set[str]:
+        return {
+            str(record.get("exam_id"))
+            for record in self.practice_data.get("attempts", [])
+            if isinstance(record, dict) and record.get("exam_id")
+        }
 
     def on_mount(self) -> None:
         self.push_screen(LibraryScreen(self.bank))
 
     def start_exam(self, exam_id: str) -> None:
-        self.push_screen(PracticeScreen(self.exam_by_id[exam_id]))
+        progress = self.practice_data.get("progress", {}).get(exam_id)
+        self.push_screen(PracticeScreen(self.exam_by_id[exam_id], progress))
+
+    def _write_practice_data(self, data: dict[str, Any]) -> bool:
+        try:
+            write_practice_data(self.data_path, data)
+        except OSError as error:
+            self.notify(f"Could not save practice data: {error}", severity="warning")
+            return False
+        self.practice_data = data
+        return True
+
+    def save_progress(
+        self,
+        exam: dict[str, Any],
+        answers: dict[str, str],
+        slot_values: dict[str, str],
+        started_at: datetime,
+        elapsed_seconds: int,
+    ) -> bool:
+        progress = dict(self.practice_data.get("progress", {}))
+        progress[exam["exam_id"]] = {
+            "schema_version": 1,
+            "exam_id": exam["exam_id"],
+            "started_at": started_at.isoformat(timespec="seconds"),
+            "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "elapsed_seconds": max(0, int(elapsed_seconds)),
+            "answers": dict(answers),
+            "slot_values": dict(slot_values),
+            "bank_commit": str(self.bank.get("source", {}).get("commit", "")),
+        }
+        data = {
+            "schema_version": self.practice_data.get("schema_version", 3),
+            "attempts": list(self.practice_data.get("attempts", [])),
+            "progress": progress,
+        }
+        return self._write_practice_data(data)
 
     def record_attempt(
         self,
@@ -985,7 +1497,7 @@ class IELTSApp(App[None]):
         answers: dict[str, str],
         started_at: datetime,
         duration_seconds: int,
-    ) -> None:
+    ) -> bool:
         correct = sum(
             question_is_correct(question, answers.get(question["id"], ""))
             for question in exam["questions"]
@@ -1000,16 +1512,31 @@ class IELTSApp(App[None]):
             "duration_seconds": max(0, int(duration_seconds)),
             "exam_id": exam["exam_id"],
             "title": exam["title"],
+            "category": exam["category"],
+            "frequency": exam["frequency"],
             "attempted": attempted,
             "correct": correct,
             "total": total,
             "accuracy": correct / total if total else 0.0,
             "answers": dict(answers),
+            "question_results": [
+                {
+                    "question_id": question["id"],
+                    "number": question["number"],
+                    "kind": question.get("kind", ""),
+                    "user_answer": answers.get(question["id"], ""),
+                    "expected_answer": question["answer"],
+                    "attempted": bool(answers.get(question["id"], "").strip()),
+                    "correct": question_is_correct(question, answers.get(question["id"], "")),
+                }
+                for question in exam["questions"]
+            ],
         }
-        try:
-            import json
-
-            with self.history_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError as error:
-            self.notify(f"Could not save history: {error}", severity="warning")
+        progress = dict(self.practice_data.get("progress", {}))
+        progress.pop(exam["exam_id"], None)
+        data = {
+            "schema_version": self.practice_data.get("schema_version", 3),
+            "attempts": [*self.practice_data.get("attempts", []), record],
+            "progress": progress,
+        }
+        return self._write_practice_data(data)

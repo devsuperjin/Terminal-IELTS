@@ -10,7 +10,7 @@ from pathlib import Path
 from .app import IELTSApp
 from .bank import bundled_bank_path, load_bank
 from .extractor import extract_question_bank, write_question_bank
-from .history import aggregate_history, read_history
+from .history import DEFAULT_DATA_PATH, aggregate_history, read_history
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -41,7 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--output", type=Path, default=bundled_bank_path())
     subparsers.add_parser("stats", help="print extracted bank statistics")
     history_stats = subparsers.add_parser("history-stats", help="print practice timing and accuracy statistics")
-    history_stats.add_argument("--history", type=Path, default=Path.cwd() / "practice_history.jsonl")
+    history_stats.add_argument(
+        "--history",
+        type=Path,
+        default=DEFAULT_DATA_PATH,
+        help="practice store or legacy JSONL path (default: ~/.terminal_ielts.json)",
+    )
     return parser
 
 

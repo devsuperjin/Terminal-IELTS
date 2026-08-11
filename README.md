@@ -13,6 +13,10 @@ complete local source snapshot of
 - Search plus part/frequency filtering
 - Split-pane reading practice with every answer field visible together,
   scoring, corrections, and local attempt history
+- Responsive practice layout: below 120 columns, one full-width pane is shown
+  at a time and the existing bottom Footer entry (or F2) switches Reading/Questions
+- Persistent passage highlights created by mouse drag, with click-to-remove,
+  undo-last, and clear-all controls
 - Radio buttons for every source single-choice control (including TRUE/FALSE
   and YES/NO), with complete option text; checkboxes for genuine multi-select
 - Dropdown selectors for matching, classification, sentence-ending, and
@@ -23,7 +27,8 @@ complete local source snapshot of
   repeating the whole paragraph for every question
 - Per-attempt start/end time, duration, attempted count, weighted accuracy,
   and backward-compatible history statistics
-- A muted charcoal theme designed to look like an ordinary terminal workspace
+- A muted Ubuntu/GNOME Terminal-style aubergine theme, enabled by default;
+  Ubuntu orange is reserved for keyboard focus rather than large bright areas
 - Keyboard-first controls in a Textual interface
 
 The current extraction contains **234 reading passages and 3,143 questions**.
@@ -45,14 +50,21 @@ Useful keys:
 
 - `/` focuses search
 - `Enter` opens the selected passage or moves to the next answer field
+- `F2` switches Reading/Questions in narrow terminals (the Footer entry is clickable)
 - `Ctrl+Up` / `Ctrl+Down` move between answer fields
 - `Ctrl+S` submits and scores the passage
 - `Escape` returns to the library
 - `Q` quits from the library
+- `Ctrl+P` opens the command palette, including Textual's theme selector
 
-Attempts are appended to `practice_history.jsonl` in the directory where the
-app is launched. Each new row uses history schema v2 and records elapsed time
-with a monotonic timer.
+Practice data is loaded from and atomically saved to `~/.terminal_ielts.json`.
+The single file contains submitted attempts plus unfinished progress. It stores
+answers, inline blank values, active practice time, detailed question results,
+and accuracy; reopening an unfinished passage restores it without counting time
+spent outside the practice screen. Submitted passages display `✓` in the library.
+Legacy `practice_history.jsonl` in the launch directory is imported when the new
+default store does not yet exist, and `history-stats --history` still accepts a
+legacy JSONL path.
 
 View aggregate practice statistics (legacy history rows are also accepted):
 

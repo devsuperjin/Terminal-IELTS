@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 
-from textual.widgets import Input, RadioButton, RadioSet, Select, Static
+from textual.widgets import Checkbox, Input, RadioButton, RadioSet, Select, Static
 
 from terminal_ielts.app import (
     CompletionEditor,
@@ -15,12 +16,19 @@ from terminal_ielts.app import (
     InlineSelectEditor,
     LibraryScreen,
     PracticeScreen,
+    ResultScreen,
+    UBUNTU_GNOME_THEME,
     heading_select_options,
     question_is_correct,
 )
 from terminal_ielts.bank import answer_is_correct, load_bank
 from terminal_ielts.extractor import normalise_exam, parse_registry_file
-from terminal_ielts.history import aggregate_history, read_history
+from terminal_ielts.history import (
+    DEFAULT_DATA_PATH,
+    aggregate_history,
+    read_history,
+    write_practice_data,
+)
 
 
 SAMPLE_PAYLOAD = {
@@ -194,11 +202,141 @@ class ExtractionTests(unittest.TestCase):
 
 
 class AppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_passage_drag_highlights_can_be_clicked_undone_and_cleared(self) -> None:
+        bank = load_bank()
+        with tempfile.TemporaryDirectory() as directory:
+            app = IELTSApp(bank, Path(directory) / "history.jsonl")
+            async with app.run_test(size=(140, 40)) as pilot:
+                await pilot.pause()
+                app.start_exam("p1-low-02")
+                await pilot.pause()
+                screen = app.screen
+                paragraph = screen.query("#passage MarkdownParagraph").first()
+                base_content = paragraph.content
+
+                await pilot.mouse_down(paragraph, offset=(0, 0))
+                await pilot.hover(paragraph, offset=(12, 0))
+                await pilot.mouse_up(paragraph, offset=(12, 0))
+                await pilot.pause()
+                self.assertEqual(len(screen.article_highlights), 1)
+                self.assertTrue(screen.article_highlights[0].parts[0].quote.strip())
+                self.assertEqual(screen.selections, {})
+                highlight_id = screen.article_highlights[0].id
+                self.assertTrue(
+                    any(
+                        getattr(span.style, "meta", {}).get("highlight_id") == highlight_id
+                        for span in paragraph.content.spans
+                    )
+                )
+
+                await pilot.resize_terminal(96, 40)
+                await pilot.pause()
+                self.assertEqual(screen.article_highlights[0].id, highlight_id)
+                self.assertTrue(
+                    any(
+                        getattr(span.style, "meta", {}).get("highlight_id") == highlight_id
+                        for span in paragraph.content.spans
+                    )
+                )
+                await pilot.resize_terminal(140, 40)
+                await pilot.pause()
+
+                await pilot.click(paragraph, offset=(3, 0))
+                await pilot.pause()
+                self.assertEqual(screen.article_highlights, [])
+                self.assertEqual(paragraph.content, base_content)
+
+                for start, end in ((0, 8), (15, 24)):
+                    await pilot.mouse_down(paragraph, offset=(start, 0))
+                    await pilot.hover(paragraph, offset=(end, 0))
+                    await pilot.mouse_up(paragraph, offset=(end, 0))
+                    await pilot.pause()
+                self.assertEqual(len(screen.article_highlights), 2)
+                screen.undo_article_highlight()
+                self.assertEqual(len(screen.article_highlights), 1)
+                screen.clear_article_highlights()
+                self.assertEqual(screen.article_highlights, [])
+                self.assertEqual(paragraph.content, base_content)
+
+    async def test_practice_workspace_switches_single_pane_when_narrow(self) -> None:
+        bank = load_bank()
+        with tempfile.TemporaryDirectory() as directory:
+            app = IELTSApp(bank, Path(directory) / "history.jsonl")
+            async with app.run_test(size=(140, 40)) as pilot:
+                await pilot.pause()
+                app.start_exam("p1-low-02")
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, PracticeScreen)
+                passage_pane = screen.query_one("#passage-pane")
+                question_pane = screen.query_one("#question-pane")
+                self.assertFalse(screen.has_class("narrow-workspace"))
+                self.assertFalse(screen.check_action("toggle_pane", ()))
+                self.assertTrue(passage_pane.display)
+                self.assertTrue(question_pane.display)
+                self.assertEqual(passage_pane.region.y, question_pane.region.y)
+                self.assertGreater(question_pane.region.x, passage_pane.region.x)
+
+                first_radio = screen.query(RadioSet).first(RadioSet)
+                first_radio.query(RadioButton).first(RadioButton).value = True
+                await pilot.resize_terminal(96, 40)
+                await pilot.pause()
+                self.assertTrue(screen.has_class("narrow-workspace"))
+                self.assertTrue(screen.check_action("toggle_pane", ()))
+                self.assertTrue(passage_pane.display)
+                self.assertFalse(question_pane.display)
+                self.assertGreater(screen.query_one("#passage-scroll").max_scroll_y, 0)
+                self.assertTrue(first_radio.query(RadioButton).first(RadioButton).value)
+
+                toggle_key = next(
+                    key for key in screen.query("FooterKey") if getattr(key, "key", None) == "f2"
+                )
+                self.assertFalse(toggle_key.has_class("-disabled"))
+                await pilot.click(toggle_key)
+                await pilot.pause()
+                self.assertFalse(passage_pane.display)
+                self.assertTrue(question_pane.display)
+                self.assertIs(screen.query_one(f"#{first_radio.id}", RadioSet), first_radio)
+                self.assertTrue(first_radio.query(RadioButton).first(RadioButton).value)
+
+                await pilot.press("f2")
+                await pilot.pause()
+                self.assertTrue(passage_pane.display)
+                self.assertFalse(question_pane.display)
+                await pilot.press("f2")
+                await pilot.pause()
+
+                await pilot.resize_terminal(140, 40)
+                await pilot.pause()
+                self.assertFalse(screen.has_class("narrow-workspace"))
+                self.assertFalse(screen.check_action("toggle_pane", ()))
+                self.assertTrue(passage_pane.display)
+                self.assertTrue(question_pane.display)
+                self.assertTrue(first_radio.query(RadioButton).first(RadioButton).value)
+
+                await pilot.resize_terminal(119, 40)
+                await pilot.pause()
+                self.assertTrue(screen.has_class("narrow-workspace"))
+                self.assertTrue(screen.check_action("toggle_pane", ()))
+                self.assertFalse(passage_pane.display)
+                self.assertTrue(question_pane.display)
+
+                await pilot.resize_terminal(120, 40)
+                await pilot.pause()
+                self.assertFalse(screen.has_class("narrow-workspace"))
+                self.assertTrue(passage_pane.display)
+                self.assertTrue(question_pane.display)
+                self.assertEqual(passage_pane.region.y, question_pane.region.y)
+
     async def test_library_and_complete_answer_form_mount(self) -> None:
         bank = load_bank()
         exam = next(exam for exam in bank["exams"] if exam["exam_id"] == "p1-low-02")
         with tempfile.TemporaryDirectory() as directory:
             app = IELTSApp(bank, Path(directory) / "history.jsonl")
+            self.assertEqual(app.theme, "ubuntu-gnome")
+            self.assertIs(app.get_theme("ubuntu-gnome"), UBUNTU_GNOME_THEME)
+            self.assertEqual(app.current_theme.background, "#300A24")
+            self.assertEqual(app.current_theme.primary, "#E95420")
             async with app.run_test(size=(120, 40)) as pilot:
                 await pilot.pause()
                 self.assertIsInstance(app.screen, LibraryScreen)
@@ -237,6 +375,69 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 app.screen.save_answers()
                 self.assertEqual(app.screen.answers[heading_question["id"]], heading_value)
 
+    async def test_progress_resumes_timer_and_submit_marks_library(self) -> None:
+        bank = load_bank()
+        exam = next(item for item in bank["exams"] if item["exam_id"] == "p1-low-02")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            app = IELTSApp(bank, path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                app.start_exam(exam["exam_id"])
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, PracticeScreen)
+                screen.elapsed_before_resume = 65
+                screen.started_monotonic = time.monotonic()
+                first_radio = screen.query(RadioSet).first(RadioSet)
+                radio_index = int(first_radio.id.removeprefix("answer-"))
+                radio_question = exam["questions"][radio_index]
+                first_radio.query(RadioButton).first(RadioButton).value = True
+                await pilot.pause()
+                screen.persist_progress()
+                screen.refresh_practice_status()
+                self.assertIn("01:05", str(screen.query_one("#progress", Static).render()))
+                draft_store = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    draft_store["progress"][exam["exam_id"]]["answers"][radio_question["id"]],
+                    radio_question["options"][0],
+                )
+                self.assertGreaterEqual(
+                    draft_store["progress"][exam["exam_id"]]["elapsed_seconds"],
+                    65,
+                )
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                screen.action_library()
+                await pilot.pause()
+
+            resumed_app = IELTSApp(bank, path)
+            async with resumed_app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                resumed_app.start_exam(exam["exam_id"])
+                await pilot.pause()
+                resumed = resumed_app.screen
+                self.assertIsInstance(resumed, PracticeScreen)
+                restored_radio = resumed.query(RadioSet).first(RadioSet)
+                self.assertTrue(restored_radio.query(RadioButton).first(RadioButton).value)
+                self.assertGreaterEqual(resumed.elapsed_seconds(), 65)
+                resumed.action_submit_exam()
+                await pilot.pause()
+                self.assertIsInstance(resumed_app.screen, ResultScreen)
+                self.assertTrue(resumed._submitted)
+                self.assertIsNone(resumed._clock_timer)
+                submitted_store = json.loads(path.read_text(encoding="utf-8"))
+                self.assertNotIn(exam["exam_id"], submitted_store["progress"])
+                self.assertEqual(submitted_store["attempts"][-1]["exam_id"], exam["exam_id"])
+                self.assertGreaterEqual(submitted_store["attempts"][-1]["duration_seconds"], 65)
+
+                resumed_app.pop_screen()
+                await pilot.pause()
+                resumed.action_library()
+                await pilot.pause()
+                self.assertIsInstance(resumed_app.screen, LibraryScreen)
+                row = resumed_app.screen.query_one("#exam-table").get_row(exam["exam_id"])
+                self.assertEqual(str(row[0]), "✓")
+
     async def test_mixed_choices_and_inline_editors_mount_with_correct_widgets(self) -> None:
         bank = load_bank()
         with tempfile.TemporaryDirectory() as directory:
@@ -266,6 +467,83 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 question = next(question for question in app.screen.exam["questions"] if question["id"] == "q7")
                 self.assertEqual(app.screen.answers["q7"], "breathing / eating")
                 self.assertTrue(question_is_correct(question, app.screen.answers["q7"]))
+                app.screen.persist_progress()
+                app.screen.action_library()
+                await pilot.pause()
+                app.start_exam("p3-low-187")
+                await pilot.pause()
+                restored_editor = app.screen.query(CompletionEditor).first(CompletionEditor)
+                self.assertEqual(restored_editor.answers["q7:0"], "breathing")
+                self.assertEqual(restored_editor.answers["q7:1"], "eating")
+
+    async def test_saved_progress_hydrates_input_select_radio_and_checkbox(self) -> None:
+        bank = load_bank()
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        drafts = {
+            "p1-high-105": {
+                "exam_id": "p1-high-105",
+                "started_at": now,
+                "elapsed_seconds": 7,
+                "answers": {"q1": "TRUE"},
+            },
+            "p1-high-211": {
+                "exam_id": "p1-high-211",
+                "started_at": now,
+                "elapsed_seconds": 7,
+                "answers": {"q5": "restored words"},
+            },
+            "p1-high-01": {
+                "exam_id": "p1-high-01",
+                "started_at": now,
+                "elapsed_seconds": 8,
+                "answers": {"q1": "i"},
+            },
+            "p1-medium-57": {
+                "exam_id": "p1-medium-57",
+                "started_at": now,
+                "elapsed_seconds": 9,
+                "answers": {"q11": "C / E / G"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            write_practice_data(path, {"attempts": [], "progress": drafts})
+            app = IELTSApp(bank, path)
+            async with app.run_test(size=(140, 45)) as pilot:
+                await pilot.pause()
+                app.start_exam("p1-high-105")
+                await pilot.pause()
+                self.assertTrue(
+                    app.screen.query_one("#answer-0", RadioSet)
+                    .query(RadioButton)
+                    .first(RadioButton)
+                    .value
+                )
+
+                app.screen.action_library()
+                await pilot.pause()
+                app.start_exam("p1-high-211")
+                await pilot.pause()
+                self.assertEqual(app.screen.query_one("#answer-4", Input).value, "restored words")
+
+                app.screen.action_library()
+                await pilot.pause()
+                app.start_exam("p1-high-01")
+                await pilot.pause()
+                self.assertEqual(app.screen.query_one("#answer-0", Select).value, "i")
+
+                app.screen.action_library()
+                await pilot.pause()
+                app.start_exam("p1-medium-57")
+                await pilot.pause()
+                selected = [
+                    checkbox.value
+                    for checkbox in app.screen.query_one("#answer-10").query(Checkbox)
+                ]
+                self.assertEqual(
+                    [index for index, value in enumerate(selected) if value],
+                    [2, 4, 6],
+                )
 
 
 class HistoryTests(unittest.TestCase):
@@ -282,16 +560,24 @@ class HistoryTests(unittest.TestCase):
                 datetime.now().astimezone(),
                 125,
             )
-            saved = json.loads(path.read_text(encoding="utf-8"))
+            store = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(store["schema_version"], 3)
+            saved = store["attempts"][0]
             self.assertEqual(saved["schema_version"], 2)
             self.assertEqual(saved["duration_seconds"], 125)
             self.assertEqual(saved["accuracy"], 1.0)
             self.assertEqual(saved["attempted"], len(exam["questions"]))
+            self.assertEqual(len(saved["question_results"]), len(exam["questions"]))
+            self.assertNotIn(exam["exam_id"], store["progress"])
 
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write("not-json\n")
-                handle.write(json.dumps({"correct": 1, "total": 2, "answers": {"q1": "x"}}) + "\n")
-            records = read_history(path)
+            legacy_path = Path(directory) / "legacy.jsonl"
+            legacy_path.write_text(
+                "not-json\n"
+                + json.dumps({"correct": 1, "total": 2, "answers": {"q1": "x"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            records = [*read_history(path), *read_history(legacy_path)]
             stats = aggregate_history(records)
             self.assertEqual(len(records), 2)
             self.assertEqual(stats["timed_attempt_count"], 1)
@@ -300,6 +586,9 @@ class HistoryTests(unittest.TestCase):
                 stats["accuracy"],
                 (len(exam["questions"]) + 1) / (len(exam["questions"]) + 2),
             )
+
+    def test_default_store_is_in_home_directory(self) -> None:
+        self.assertEqual(DEFAULT_DATA_PATH, Path.home() / ".terminal_ielts.json")
 
 
 if __name__ == "__main__":
