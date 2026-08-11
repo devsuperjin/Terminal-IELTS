@@ -35,6 +35,7 @@ from textual.widgets import (
     RadioSet,
     Select,
     Static,
+    TextArea,
 )
 from textual.widgets._markdown import MarkdownBlock
 
@@ -79,6 +80,26 @@ UBUNTU_GNOME_THEME = Theme(
         "markdown-h4-color": "#D3D7CF",
     },
 )
+
+
+CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+CJK_BRACKET_RE = re.compile(
+    r"\([^)]*[\u3400-\u4dbf\u4e00-\u9fff][^)]*\)"
+    r"|（[^）]*[\u3400-\u4dbf\u4e00-\u9fff][^）]*）"
+    r"|【[^】]*[\u3400-\u4dbf\u4e00-\u9fff][^】]*】"
+)
+
+
+def display_exam_title(title: str) -> str:
+    """Return the source title's English display portion without mutating data."""
+    cleaned = CJK_BRACKET_RE.sub(" ", str(title))
+    cleaned = re.sub(r"^\s*\d{4}[\u3400-\u4dbf\u4e00-\u9fff]+\s*", "", cleaned)
+    first_cjk = CJK_RE.search(cleaned)
+    if first_cjk is not None:
+        cleaned = cleaned[: first_cjk.start()]
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.strip(" \t-_—–:：")
+    return cleaned or "Untitled passage"
 
 
 @dataclass(frozen=True)
@@ -605,6 +626,59 @@ class ResultScreen(ModalScreen[None]):
         self.dismiss()
 
 
+class NotesScreen(ModalScreen[None]):
+    """Focused multi-line notes editor for one reading passage."""
+
+    AUTO_FOCUS = "#notes-editor"
+    BINDINGS = [
+        Binding("ctrl+s", "save_note", "Save note", priority=True),
+        Binding("escape", "cancel_note", "Cancel", priority=True),
+    ]
+
+    def __init__(self, exam_id: str, title: str, initial_text: str) -> None:
+        super().__init__()
+        self.exam_id = exam_id
+        self.title = title
+        self.initial_text = initial_text
+
+    def compose(self) -> ComposeResult:
+        with Container(id="notes-card"):
+            yield Static("TAKE NOTES", classes="eyebrow")
+            yield Static(self.title, id="notes-title")
+            yield TextArea(
+                self.initial_text,
+                id="notes-editor",
+                placeholder="Write notes for this passage…",
+                soft_wrap=True,
+                show_line_numbers=False,
+                tab_behavior="focus",
+            )
+            with Horizontal(id="notes-actions"):
+                yield Button("Save note", id="save-note")
+                yield Button("Cancel", id="cancel-note")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        editor = self.query_one("#notes-editor", TextArea)
+        last_row = editor.document.line_count - 1
+        editor.move_cursor((last_row, len(editor.document[last_row])))
+
+    def action_save_note(self) -> None:
+        note = self.query_one("#notes-editor", TextArea).text
+        if self.app.save_note(self.exam_id, note):
+            self.dismiss()
+
+    def action_cancel_note(self) -> None:
+        self.dismiss()
+
+    @on(Button.Pressed)
+    def button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save-note":
+            self.action_save_note()
+        elif event.button.id == "cancel-note":
+            self.action_cancel_note()
+
+
 class LibraryScreen(Screen[None]):
     BINDINGS = [
         Binding("/", "focus_search", "Search", show=True),
@@ -675,7 +749,7 @@ class LibraryScreen(Screen[None]):
                 "✓" if exam["exam_id"] in self.app.completed_exam_ids else "",
                 exam["category"],
                 exam["frequency"].title(),
-                exam["title"],
+                display_exam_title(exam["title"]),
                 str(len(exam["questions"])),
                 key=exam["exam_id"],
             )
@@ -715,6 +789,7 @@ class PracticeScreen(Screen[None]):
 
     BINDINGS = [
         Binding("f2", "toggle_pane", "Switch view"),
+        Binding("ctrl+n", "take_notes", "Take notes", priority=True),
         Binding("ctrl+up", "previous_answer", "Previous answer"),
         Binding("ctrl+down", "next_answer", "Next answer"),
         Binding("ctrl+s", "submit_exam", "Submit"),
@@ -765,7 +840,7 @@ class PracticeScreen(Screen[None]):
             with Horizontal(id="practice-topbar"):
                 with Vertical():
                     yield Static(self.exam["category"] + "  /  " + self.exam["frequency"].upper(), classes="eyebrow")
-                    yield Static(self.exam["title"], id="exam-title")
+                    yield Static(display_exam_title(self.exam["title"]), id="exam-title")
                 yield Static("", id="progress")
             with Horizontal(id="workspace"):
                 with Vertical(classes="pane", id="passage-pane"):
@@ -963,6 +1038,17 @@ class PracticeScreen(Screen[None]):
             return
         next_pane = "questions" if self._narrow_pane == "passage" else "passage"
         self.show_narrow_pane(next_pane)
+
+    def action_take_notes(self) -> None:
+        if not self._submitted:
+            self.persist_progress()
+        self.app.push_screen(
+            NotesScreen(
+                self.exam["exam_id"],
+                display_exam_title(self.exam["title"]),
+                self.app.note_for_exam(self.exam["exam_id"]),
+            )
+        )
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_pane":
@@ -1416,6 +1502,19 @@ class IELTSApp(App[None]):
     Button { background: $panel; color: $foreground; border: tall $border; }
     Button:hover { background: $secondary-background; }
     Button:focus { background: $secondary-background; color: $foreground; border: tall $primary; }
+    NotesScreen { align: center middle; background: $background-darken-2 78%; }
+    #notes-card {
+        width: 90%; max-width: 100; min-width: 36; height: 75%; min-height: 16;
+        padding: 1 2; border: round $border; background: $surface;
+    }
+    #notes-title { height: 2; color: $foreground; text-style: bold; }
+    #notes-editor {
+        height: 1fr; margin: 1 0; border: round $border-blurred;
+        background: $background-darken-1; color: $foreground;
+    }
+    #notes-editor:focus { border: round $primary; }
+    #notes-actions { height: 3; }
+    #notes-actions Button { min-width: 14; margin-right: 1; }
     ResultScreen { align: center middle; background: $background-darken-2 78%; }
     #result-card { width: 72; height: 30; padding: 2 3; border: round $border; background: $surface; }
     #score { height: 4; padding-top: 1; color: $foreground; text-style: bold; text-align: center; }
@@ -1465,6 +1564,27 @@ class IELTSApp(App[None]):
         self.practice_data = data
         return True
 
+    def note_for_exam(self, exam_id: str) -> str:
+        note = self.practice_data.get("notes", {}).get(exam_id, {})
+        if isinstance(note, str):
+            return note
+        return str(note.get("text", "")) if isinstance(note, dict) else ""
+
+    def save_note(self, exam_id: str, text: str) -> bool:
+        notes = dict(self.practice_data.get("notes", {}))
+        if text.strip():
+            notes[exam_id] = {
+                "schema_version": 1,
+                "text": text,
+                "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "bank_commit": str(self.bank.get("source", {}).get("commit", "")),
+            }
+        else:
+            notes.pop(exam_id, None)
+        data = dict(self.practice_data)
+        data["notes"] = notes
+        return self._write_practice_data(data)
+
     def save_progress(
         self,
         exam: dict[str, Any],
@@ -1484,11 +1604,13 @@ class IELTSApp(App[None]):
             "slot_values": dict(slot_values),
             "bank_commit": str(self.bank.get("source", {}).get("commit", "")),
         }
-        data = {
-            "schema_version": self.practice_data.get("schema_version", 3),
-            "attempts": list(self.practice_data.get("attempts", [])),
-            "progress": progress,
-        }
+        data = dict(self.practice_data)
+        data.update(
+            {
+                "attempts": list(self.practice_data.get("attempts", [])),
+                "progress": progress,
+            }
+        )
         return self._write_practice_data(data)
 
     def record_attempt(
@@ -1534,9 +1656,11 @@ class IELTSApp(App[None]):
         }
         progress = dict(self.practice_data.get("progress", {}))
         progress.pop(exam["exam_id"], None)
-        data = {
-            "schema_version": self.practice_data.get("schema_version", 3),
-            "attempts": [*self.practice_data.get("attempts", []), record],
-            "progress": progress,
-        }
+        data = dict(self.practice_data)
+        data.update(
+            {
+                "attempts": [*self.practice_data.get("attempts", []), record],
+                "progress": progress,
+            }
+        )
         return self._write_practice_data(data)

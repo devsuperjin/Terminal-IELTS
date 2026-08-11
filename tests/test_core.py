@@ -8,16 +8,18 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from textual.widgets import Checkbox, Input, RadioButton, RadioSet, Select, Static
+from textual.widgets import Checkbox, Input, RadioButton, RadioSet, Select, Static, TextArea
 
 from terminal_ielts.app import (
     CompletionEditor,
     IELTSApp,
     InlineSelectEditor,
     LibraryScreen,
+    NotesScreen,
     PracticeScreen,
     ResultScreen,
     UBUNTU_GNOME_THEME,
+    display_exam_title,
     heading_select_options,
     question_is_correct,
 )
@@ -62,6 +64,17 @@ class ExtractionTests(unittest.TestCase):
         self.assertTrue(
             all(question["prompt"] and question["answer"] for exam in bank["exams"] for question in exam["questions"])
         )
+
+    def test_display_titles_are_english_only_without_mutating_source_data(self) -> None:
+        bank = load_bank()
+        cjk = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+        titles = {exam["exam_id"]: exam["title"] for exam in bank["exams"]}
+        self.assertEqual(display_exam_title(titles["p1-high-01"]), "A Brief History of Tea")
+        self.assertEqual(display_exam_title(titles["p2-low-87"]), "Speaking of Nothing [Pretest]")
+        self.assertEqual(display_exam_title(titles["p3-medium-169"]), "Music Language We All Speak")
+        self.assertTrue(all(display_exam_title(title) for title in titles.values()))
+        self.assertFalse(any(cjk.search(display_exam_title(title)) for title in titles.values()))
+        self.assertIn("茶叶简史", titles["p1-high-01"])
 
     def test_normalise_exam_extracts_passage_prompt_options_and_answer(self) -> None:
         exam = normalise_exam(SAMPLE_PAYLOAD)
@@ -438,6 +451,59 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 row = resumed_app.screen.query_one("#exam-table").get_row(exam["exam_id"])
                 self.assertEqual(str(row[0]), "✓")
 
+    async def test_take_notes_shortcut_persists_and_survives_submit(self) -> None:
+        bank = load_bank()
+        exam = next(item for item in bank["exams"] if item["exam_id"] == "p1-high-211")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            app = IELTSApp(bank, path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                library_row = app.screen.query_one("#exam-table").get_row(exam["exam_id"])
+                self.assertEqual(str(library_row[3]), "Ahead of its time")
+                app.start_exam(exam["exam_id"])
+                await pilot.pause()
+                practice = app.screen
+                self.assertIsInstance(practice, PracticeScreen)
+                self.assertEqual(
+                    str(practice.query_one("#exam-title", Static).render()),
+                    "Ahead of its time",
+                )
+                answer_input = practice.query_one("#answer-4", Input)
+                answer_input.focus()
+                await pilot.press("ctrl+n")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, NotesScreen)
+                editor = app.screen.query_one("#notes-editor", TextArea)
+                self.assertTrue(editor.has_focus)
+                editor.load_text("Key vocabulary\n第二行笔记")
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+                self.assertIs(app.screen, practice)
+                self.assertFalse(practice._submitted)
+                self.assertEqual(app.note_for_exam(exam["exam_id"]), "Key vocabulary\n第二行笔记")
+
+                await pilot.press("ctrl+n")
+                await pilot.pause()
+                self.assertEqual(
+                    app.screen.query_one("#notes-editor", TextArea).text,
+                    "Key vocabulary\n第二行笔记",
+                )
+                app.screen.query_one("#notes-editor", TextArea).load_text("discard this")
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertEqual(app.note_for_exam(exam["exam_id"]), "Key vocabulary\n第二行笔记")
+
+                practice.action_submit_exam()
+                await pilot.pause()
+                stored = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(stored["schema_version"], 4)
+                self.assertEqual(
+                    stored["notes"][exam["exam_id"]]["text"],
+                    "Key vocabulary\n第二行笔记",
+                )
+                self.assertNotIn(exam["exam_id"], stored["progress"])
+
     async def test_mixed_choices_and_inline_editors_mount_with_correct_widgets(self) -> None:
         bank = load_bank()
         with tempfile.TemporaryDirectory() as directory:
@@ -561,7 +627,7 @@ class HistoryTests(unittest.TestCase):
                 125,
             )
             store = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(store["schema_version"], 3)
+            self.assertEqual(store["schema_version"], 4)
             saved = store["attempts"][0]
             self.assertEqual(saved["schema_version"], 2)
             self.assertEqual(saved["duration_seconds"], 125)

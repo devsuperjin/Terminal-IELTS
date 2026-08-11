@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-STORE_SCHEMA_VERSION = 3
+STORE_SCHEMA_VERSION = 4
 DEFAULT_DATA_PATH = Path.home() / ".terminal_ielts.json"
 
 
@@ -22,7 +22,12 @@ def _count(value: Any, *, maximum: int | None = None) -> int:
 
 def empty_practice_data() -> dict[str, Any]:
     """Return a new empty single-file practice store."""
-    return {"schema_version": STORE_SCHEMA_VERSION, "attempts": [], "progress": {}}
+    return {
+        "schema_version": STORE_SCHEMA_VERSION,
+        "attempts": [],
+        "progress": {},
+        "notes": {},
+    }
 
 
 def _normalise_progress(progress: Any) -> dict[str, dict[str, Any]]:
@@ -50,8 +55,38 @@ def _normalise_progress(progress: Any) -> dict[str, dict[str, Any]]:
     return cleaned
 
 
+def _normalise_notes(notes: Any) -> dict[str, dict[str, Any]]:
+    """Normalise passage notes while accepting the early string shorthand."""
+    if not isinstance(notes, dict):
+        return {}
+    cleaned: dict[str, dict[str, Any]] = {}
+    for key, value in notes.items():
+        exam_id = str(key)
+        if not exam_id:
+            continue
+        if isinstance(value, str):
+            text = value
+            updated_at = None
+            bank_commit = ""
+        elif isinstance(value, dict):
+            text = str(value.get("text", ""))
+            updated_at = value.get("updated_at")
+            bank_commit = str(value.get("bank_commit", ""))
+        else:
+            continue
+        if not text:
+            continue
+        cleaned[exam_id] = {
+            "schema_version": 1,
+            "text": text,
+            "updated_at": updated_at,
+            "bank_commit": bank_commit,
+        }
+    return cleaned
+
+
 def load_practice_data(path: Path) -> dict[str, Any]:
-    """Load the v3 store, a legacy JSON object/list, or legacy JSONL rows."""
+    """Load the current store, a legacy JSON object/list, or legacy JSONL rows."""
     if not path.exists():
         return empty_practice_data()
     try:
@@ -68,11 +103,15 @@ def load_practice_data(path: Path) -> dict[str, Any]:
 
     attempts: list[dict[str, Any]] = []
     progress: dict[str, dict[str, Any]] = {}
-    if isinstance(value, dict) and ("attempts" in value or "progress" in value):
+    notes: dict[str, dict[str, Any]] = {}
+    if isinstance(value, dict) and (
+        "attempts" in value or "progress" in value or "notes" in value
+    ):
         raw_attempts = value.get("attempts", [])
         if isinstance(raw_attempts, list):
             attempts = [dict(record) for record in raw_attempts if isinstance(record, dict)]
         progress = _normalise_progress(value.get("progress"))
+        notes = _normalise_notes(value.get("notes"))
     elif isinstance(value, dict):
         attempts = [dict(value)]
     elif isinstance(value, list):
@@ -90,6 +129,7 @@ def load_practice_data(path: Path) -> dict[str, Any]:
         "schema_version": STORE_SCHEMA_VERSION,
         "attempts": attempts,
         "progress": progress,
+        "notes": notes,
     }
 
 
@@ -102,6 +142,7 @@ def write_practice_data(path: Path, data: dict[str, Any]) -> None:
             dict(record) for record in data.get("attempts", []) if isinstance(record, dict)
         ],
         "progress": _normalise_progress(data.get("progress")),
+        "notes": _normalise_notes(data.get("notes")),
     }
     temporary = path.with_name(f"{path.name}.tmp")
     with temporary.open("w", encoding="utf-8") as handle:
@@ -146,7 +187,7 @@ def normalise_history_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_history(path: Path) -> list[dict[str, Any]]:
-    """Read attempts from the v3 store or any supported legacy format."""
+    """Read attempts from the current store or any supported legacy format."""
     data = load_practice_data(path)
     return [normalise_history_record(record) for record in data["attempts"]]
 
