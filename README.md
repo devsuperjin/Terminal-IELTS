@@ -5,6 +5,20 @@ A terminal-style IELTS Reading practice application built with Python and
 complete local source snapshot of
 [`sallowayma-git/IELTS-practice`](https://github.com/sallowayma-git/IELTS-practice).
 
+## Screenshots
+
+### Question bank
+
+![Terminal IELTS question bank](docs/images/library.svg)
+
+### Split-pane practice
+
+![Terminal IELTS split-pane reading practice](docs/images/practice.svg)
+
+### Take notes
+
+![Terminal IELTS take-notes editor](docs/images/take-notes.svg)
+
 ## What it includes
 
 - A complete, unmodified upstream source tree in `source/IELTS-practice/`
