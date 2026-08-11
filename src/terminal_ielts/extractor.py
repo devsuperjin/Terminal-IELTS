@@ -781,6 +781,24 @@ def normalise_exam(payload: dict[str, Any]) -> dict[str, Any]:
         structurally_matching = group["kind"] in {"matching", "classification"} or (
             group["kind"] != "sentence_completion" and _is_matching_like(soup)
         )
+        if group["kind"] == "short_answer" and not structurally_matching:
+            instruction_text = group["instructions"].casefold()
+            completion_template, completion_slots = extract_completion_template(
+                soup, group["question_ids"]
+            )
+            slotted_ids = {str(slot["question_id"]) for slot in completion_slots}
+            if (
+                re.search(
+                    r"\bcomplete\s+the\s+(?:notes?|sentences?|summary)\b",
+                    instruction_text,
+                )
+                and completion_slots
+                and slotted_ids == set(group["question_ids"])
+                and len(completion_slots) == len(group["question_ids"])
+                and not _extract_group_option_items(soup, group["question_ids"])
+            ):
+                group["source_kind"] = group["kind"]
+                group["kind"] = "sentence_completion"
         if structurally_matching and group["kind"] not in {"matching", "classification"}:
             group["source_kind"] = group["kind"]
             group["kind"] = "matching"

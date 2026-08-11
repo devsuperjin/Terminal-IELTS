@@ -281,6 +281,28 @@ def group_type_label(group: dict[str, Any], questions: list[dict[str, Any]]) -> 
     return kind.replace("_", " ").upper()
 
 
+def completion_blank_label(
+    template: str,
+    token_start: int,
+    source_number: str,
+    display_number: str,
+    shown: str,
+) -> str:
+    """Avoid repeating a question number already present beside an inline blank."""
+    line_prefix = template[:token_start].rsplit("\n", 1)[-1]
+    escaped_number = re.escape(source_number)
+    number_starts_line = re.match(
+        rf"^\s*(?:[-•]\s*)?{escaped_number}(?:[.)]?\s+)",
+        line_prefix,
+    )
+    number_precedes_blank = re.search(
+        rf"(?<!\w){escaped_number}(?:[.)])?\s*$",
+        line_prefix,
+    )
+    prefix = "" if number_starts_line or number_precedes_blank else f"{display_number}: "
+    return f" {prefix}{shown} "
+
+
 class CompletionInput(Input):
     """Native input that reserves Tab navigation for inline completion slots."""
 
@@ -344,10 +366,12 @@ class CompletionEditor(Container):
             question_id = str(slot["question_id"])
             occurrence_count[question_id] = occurrence_count.get(question_id, 0) + 1
         self.numbers: dict[str, str] = {}
+        self.source_numbers: dict[str, str] = {}
         for slot in slots:
             slot_id = str(slot["slot_id"])
             question_id = str(slot["question_id"])
             number = str(question_by_id[question_id]["number"])
+            self.source_numbers[slot_id] = number
             if occurrence_count[question_id] > 1:
                 number += chr(ord("a") + int(slot.get("occurrence", 0)))
             self.numbers[slot_id] = number
@@ -401,7 +425,13 @@ class CompletionEditor(Container):
                 answer = self.answers[slot_id]
                 number = self.numbers[slot_id]
                 blank = answer if answer else "________"
-                label = f" {number}: {blank} "
+                label = completion_blank_label(
+                    self.template,
+                    match.start(),
+                    self.source_numbers[slot_id],
+                    number,
+                    blank,
+                )
                 is_active = slot_id == self.active_slot_id
                 input_widget = self.query_one(CompletionInput) if self.is_mounted else None
                 if is_active and input_widget is not None and input_widget.has_focus:
@@ -505,10 +535,11 @@ class InlineSelectEditor(Container):
             if match.group(1) in self.slot_by_id
         ]
         question_by_id = {question["id"]: question for question in questions}
-        self.numbers = {
+        self.source_numbers = {
             slot_id: str(question_by_id[str(self.slot_by_id[slot_id]["question_id"])]["number"])
             for slot_id in self.field_ids
         }
+        self.numbers = dict(self.source_numbers)
         self.options = [
             {"value": str(option["value"]), "label": str(option.get("label", option["value"]))}
             for option in options
@@ -553,7 +584,13 @@ class InlineSelectEditor(Container):
             if slot_id in self.answers:
                 answer = self.answers[slot_id]
                 shown = answer if answer else "________"
-                label = f" {self.numbers[slot_id]}: {shown} "
+                label = completion_blank_label(
+                    self.template,
+                    match.start(),
+                    self.source_numbers[slot_id],
+                    self.numbers[slot_id],
+                    shown,
+                )
                 if slot_id == self.active_slot_id:
                     rendered.append(label, style="bold #EEEEEC on #5E2750")
                 elif answer:

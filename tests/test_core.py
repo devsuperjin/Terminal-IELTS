@@ -161,12 +161,12 @@ class ExtractionTests(unittest.TestCase):
             for group in exam["groups"]
             if group["kind"] == "sentence_completion"
         ]
-        self.assertEqual(len(sentence_groups), 68)
-        self.assertEqual(sum(group.get("response_mode") == "inline_text" for group in sentence_groups), 62)
+        self.assertEqual(len(sentence_groups), 82)
+        self.assertEqual(sum(group.get("response_mode") == "inline_text" for group in sentence_groups), 76)
         self.assertEqual(sum(group.get("subtype") == "ending_select" for group in sentence_groups), 6)
         self.assertEqual(
             sum(len(group.get("completion_slots", [])) for group in sentence_groups),
-            347,
+            428,
         )
         for exam in bank["exams"]:
             owned = [question_id for group in exam["groups"] for question_id in group["question_ids"]]
@@ -211,6 +211,19 @@ class ExtractionTests(unittest.TestCase):
                 ("p3-low-83", "34"): ["inspiration", "elaboration"],
                 ("p3-low-187", "33"): ["breathing", "eating"],
             },
+        )
+
+    def test_mislabelled_short_answer_notes_are_inline_sentence_completion(self) -> None:
+        exam = next(exam for exam in load_bank()["exams"] if exam["exam_id"] == "p1-high-194")
+        group = next(group for group in exam["groups"] if group["id"] == "group-2")
+        self.assertEqual(group["source_kind"], "short_answer")
+        self.assertEqual(group["kind"], "sentence_completion")
+        self.assertEqual(group["response_mode"], "inline_text")
+        self.assertIn("Woollen cloth manufacture", group["completion_template"])
+        self.assertIn("[[[q6:0]]]", group["completion_template"])
+        self.assertEqual(
+            {slot["question_id"] for slot in group["completion_slots"]},
+            {f"q{number}" for number in range(6, 14)},
         )
 
 
@@ -541,6 +554,27 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 restored_editor = app.screen.query(CompletionEditor).first(CompletionEditor)
                 self.assertEqual(restored_editor.answers["q7:0"], "breathing")
                 self.assertEqual(restored_editor.answers["q7:1"], "eating")
+
+    async def test_reclassified_notes_render_once_without_duplicate_question_numbers(self) -> None:
+        bank = load_bank()
+        with tempfile.TemporaryDirectory() as directory:
+            app = IELTSApp(bank, Path(directory) / "state.json")
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.pause()
+                app.start_exam("p1-high-194")
+                await pilot.pause()
+                editor = app.screen.query(CompletionEditor).first(CompletionEditor)
+                rendered = editor.render_template().plain
+                self.assertIn("Woollen cloth manufacture", rendered)
+                self.assertNotIn("6  6:", rendered)
+                self.assertEqual(len(app.screen.query(CompletionEditor)), 1)
+
+                app.screen.action_library()
+                await pilot.pause()
+                app.start_exam("p1-high-227")
+                await pilot.pause()
+                unnumbered_source = app.screen.query(CompletionEditor).first(CompletionEditor)
+                self.assertIn("8: ________", unnumbered_source.render_template().plain)
 
     async def test_long_radio_labels_wrap_in_narrow_terminal(self) -> None:
         bank = load_bank()
