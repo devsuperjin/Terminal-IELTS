@@ -945,7 +945,7 @@ class PracticeScreen(Screen[None]):
                     yield Static("READING PASSAGE", classes="pane-title")
                     with Horizontal(id="passage-tools"):
                         yield Static(
-                            "Drag to highlight & copy · F3 / Ctrl+G copies passage",
+                            "Drag to highlight · Ctrl+C copies selection · F3 / Ctrl+G copies passage",
                             id="highlight-help",
                         )
                         yield Button(
@@ -1214,9 +1214,6 @@ class PracticeScreen(Screen[None]):
         self._next_highlight_id += 1
         self.article_highlights.append(highlight)
         self._render_article_highlights()
-        if selected_text := self.get_selected_text():
-            self.app.copy_to_clipboard(selected_text)
-            self.notify("Selection copied")
 
     @on(events.Click)
     def remove_clicked_article_highlight(self, event: events.Click) -> None:
@@ -1246,7 +1243,7 @@ class PracticeScreen(Screen[None]):
 
     def _update_highlight_controls(self) -> None:
         count = len(self.article_highlights)
-        status = "Drag to highlight & copy · F3 / Ctrl+G copies passage"
+        status = "Drag to highlight · Ctrl+C copies selection · F3 / Ctrl+G copies passage"
         if count:
             status += f"  ·  {count} saved"
         self.query_one("#highlight-help", Static).update(status)

@@ -32,8 +32,8 @@ complete local source snapshot of
   at a time and the existing bottom Footer entry (or F2) switches Reading/Questions
 - Persistent passage highlights created by mouse drag, with click-to-remove,
   undo-last, and clear-all controls
-- Drag-selected passage text is highlighted and copied immediately; F3 or
-  Ctrl+G copies the complete rendered article as plain text
+- Drag-selected passage text is highlighted; Ctrl+C copies the current
+  selection, while F3 or Ctrl+G copies the complete rendered article as plain text
 - Per-passage notes opened with Ctrl+N and saved independently of submissions
 - Radio buttons for every source single-choice control (including TRUE/FALSE
   and YES/NO), with complete option text; checkboxes for genuine multi-select
