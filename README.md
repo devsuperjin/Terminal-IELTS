@@ -95,9 +95,41 @@ uv run terminal-ielts history-stats
 
 Inside a paragraph completion editor, `Tab` / `Shift+Tab` moves between blanks.
 
-Clipboard integration uses macOS `pbcopy`; on Linux it supports Wayland
-`wl-copy` and X11 `xclip` or `xsel`, then falls back to the terminal's OSC 52
-clipboard support when no native helper is available.
+## Clipboard
+
+Clipboard integration uses native system commands:
+
+- macOS: `pbcopy`
+- Linux Wayland: `wl-copy`
+- Linux X11: `xclip` or `xsel`
+
+On Linux, install the helper that matches your session type:
+
+```bash
+# Wayland (most modern GNOME/KDE desktops)
+sudo apt install wl-clipboard
+
+# X11
+sudo apt install xclip
+```
+
+If no native helper is installed, the app shows a warning such as
+`Clipboard unavailable: install wl-clipboard ...` and falls back to the
+terminal's OSC 52 clipboard support, which only works in terminals that
+support it (e.g. Kitty, Alacritty).
+
+When launching the app from a `.desktop` file, systemd user unit, or other
+context that strips environment variables, `wl-copy` may not find the
+Wayland socket.  The app now re-injects sensible defaults for
+`XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` automatically; if you still have
+issues, launch it from the terminal where `wl-copy` works, or export them
+before launching:
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export WAYLAND_DISPLAY=wayland-0
+uv run terminal-ielts
+```
 
 ## Re-extract the bank
 

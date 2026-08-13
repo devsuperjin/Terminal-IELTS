@@ -94,40 +94,135 @@ CJK_BRACKET_RE = re.compile(
 )
 
 
-def native_clipboard_command() -> list[str] | None:
-    """Return a local system-clipboard command for macOS or Linux."""
-    if sys.platform == "darwin":
-        return [pbcopy] if (pbcopy := shutil.which("pbcopy")) else None
-    if not sys.platform.startswith("linux"):
-        return None
-    if os.environ.get("WAYLAND_DISPLAY") and (wl_copy := shutil.which("wl-copy")):
-        return [wl_copy]
-    if os.environ.get("DISPLAY"):
-        if xclip := shutil.which("xclip"):
-            return [xclip, "-selection", "clipboard"]
-        if xsel := shutil.which("xsel"):
-            return [xsel, "--clipboard", "--input"]
+def _find_executable(name: str) -> str | None:
+    """Find an executable by name, also checking common absolute paths."""
+    if path := shutil.which(name):
+        return path
+    for candidate in (
+        f"/usr/bin/{name}",
+        f"/usr/local/bin/{name}",
+        f"/bin/{name}",
+        f"/opt/bin/{name}",
+        f"/snap/bin/{name}",
+        f"{os.path.expanduser('~')}/.local/bin/{name}",
+    ):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     return None
 
 
-def copy_to_native_clipboard(text: str) -> bool:
-    """Write text to a local clipboard backend without invoking a shell."""
-    command = native_clipboard_command()
-    if command is None:
-        return False
+def _clipboard_commands() -> list[list[str]]:
+    """Return all available native system-clipboard commands."""
+    commands: list[list[str]] = []
+    if sys.platform == "darwin":
+        if pbcopy := _find_executable("pbcopy"):
+            commands.append([pbcopy])
+        return commands
+    if not sys.platform.startswith("linux"):
+        return commands
+
+    # Prefer the tool that matches the current session type first.
+    if os.environ.get("WAYLAND_DISPLAY") and (wl_copy := _find_executable("wl-copy")):
+        commands.append([wl_copy])
+    if os.environ.get("DISPLAY"):
+        if xclip := _find_executable("xclip"):
+            commands.append([xclip, "-selection", "clipboard"])
+        if xsel := _find_executable("xsel"):
+            commands.append([xsel, "--clipboard", "--input"])
+
+    # Also try any installed tool as a fallback, so a missing env var does not
+    # silently prevent clipboard usage.
+    if (wl_copy := _find_executable("wl-copy")) and [wl_copy] not in commands:
+        commands.append([wl_copy])
+    if (xclip := _find_executable("xclip")) and [xclip, "-selection", "clipboard"] not in commands:
+        commands.append([xclip, "-selection", "clipboard"])
+    if (xsel := _find_executable("xsel")) and [xsel, "--clipboard", "--input"] not in commands:
+        commands.append([xsel, "--clipboard", "--input"])
+    return commands
+
+
+def native_clipboard_missing_hint() -> str:
+    """Return a platform-specific install hint when no clipboard tool is found."""
+    if sys.platform == "darwin":
+        return "pbcopy is not available"
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return "install wl-clipboard (e.g. apt install wl-clipboard)"
+    if os.environ.get("DISPLAY"):
+        return "install xclip or xsel (e.g. apt install xclip)"
+    return "no clipboard backend found"
+
+
+def _clipboard_subprocess_env() -> dict[str, str]:
+    """Build an subprocess environment for clipboard tools.
+
+    Some launch contexts (systemd user units, .desktop files, etc.) strip
+    Wayland/X11 variables.  Re-inject sensible defaults so wl-copy/xclip can
+    find the display.
+    """
+    env = os.environ.copy()
+    if sys.platform == "darwin":
+        return env
+
+    if "XDG_RUNTIME_DIR" not in env:
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+
+    if "WAYLAND_DISPLAY" not in env and "DISPLAY" not in env:
+        xdg_runtime = env["XDG_RUNTIME_DIR"]
+        for display in ("wayland-0", "wayland-1", "wayland-2"):
+            if os.path.exists(os.path.join(xdg_runtime, display)):
+                env["WAYLAND_DISPLAY"] = display
+                break
+
+    # If X11 is available but XAUTHORITY is missing, the XWayland socket is
+    # usually enough for xclip/xsel; no further defaults are needed.
+    return env
+
+
+def _run_clipboard_command(command: list[str], text: str) -> bool:
+    """Run a single clipboard command.  Return True if it succeeds."""
     try:
-        subprocess.run(
+        # Use Popen and manually close stdin after writing.  wl-copy (and
+        # some other clipboard tools) can hang when stdin is passed via
+        # subprocess.run(input=...) because they wait for EOF in a way that
+        # Python's communicate() does not satisfy.
+        proc = subprocess.Popen(
             command,
-            input=text,
-            text=True,
-            check=True,
-            timeout=2,
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=_clipboard_subprocess_env(),
         )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        if proc.stdin is not None:
+            proc.stdin.write(text.encode("utf-8"))
+            proc.stdin.close()
+        proc.wait(timeout=2)
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
         return False
-    return True
+
+
+def copy_to_native_clipboard(text: str) -> tuple[bool, str]:
+    """Write text to a local system clipboard backend without invoking a shell.
+
+    Returns a (success, error_message) tuple.  On Linux, multiple tools are
+    attempted in case the first one fails.
+    """
+    commands = _clipboard_commands()
+    if not commands:
+        env_info = (
+            f"PATH={os.environ.get('PATH', 'not set')}; "
+            f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY', 'unset')}; "
+            f"DISPLAY={os.environ.get('DISPLAY', 'unset')}; "
+            f"wl-copy={_find_executable('wl-copy') or 'not found'}; "
+            f"xclip={_find_executable('xclip') or 'not found'}; "
+            f"xsel={_find_executable('xsel') or 'not found'}"
+        )
+        return False, env_info
+
+    for command in commands:
+        if _run_clipboard_command(command, text):
+            return True, ""
+    return False, f"{' / '.join(' '.join(c) for c in commands)} failed"
 
 
 def display_exam_title(title: str) -> str:
@@ -1167,8 +1262,14 @@ class PracticeScreen(Screen[None]):
         if not text:
             self.notify("Passage text is not ready", severity="warning")
             return
-        self.app.copy_to_clipboard(text)
-        self.notify("Passage copied · if paste is empty, use terminal-native copy")
+        success, error = self.app.copy_to_clipboard(text)
+        if success:
+            self.notify("Passage copied to clipboard")
+        else:
+            self.notify(
+                f"Clipboard unavailable: {error}",
+                severity="warning",
+            )
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_pane":
@@ -1666,11 +1767,15 @@ class IELTSApp(App[None]):
         else:
             self.practice_data = load_practice_data(self.data_path)
 
-    def copy_to_clipboard(self, text: str) -> None:
-        """Copy through Textual, plus native macOS/Linux clipboard backends."""
+    def copy_to_clipboard(self, text: str) -> tuple[bool, str]:
+        """Copy through Textual, plus native macOS/Linux clipboard backends.
+
+        Returns (success, error_message).
+        """
         super().copy_to_clipboard(text)
-        if not self.is_web and not self.is_headless:
-            copy_to_native_clipboard(text)
+        if self.is_web or self.is_headless:
+            return True, ""
+        return copy_to_native_clipboard(text)
 
     @property
     def completed_exam_ids(self) -> set[str]:
