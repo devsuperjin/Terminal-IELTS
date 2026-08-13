@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import tempfile
 import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from textual.widgets import Checkbox, Input, RadioButton, RadioSet, Select, Static, TextArea
 
@@ -19,8 +21,10 @@ from terminal_ielts.app import (
     PracticeScreen,
     ResultScreen,
     UBUNTU_GNOME_THEME,
+    copy_to_native_clipboard,
     display_exam_title,
     heading_select_options,
+    native_clipboard_command,
     question_is_correct,
 )
 from terminal_ielts.bank import answer_is_correct, load_bank
@@ -228,6 +232,43 @@ class ExtractionTests(unittest.TestCase):
 
 
 class AppTests(unittest.IsolatedAsyncioTestCase):
+    def test_native_clipboard_backends_cover_macos_wayland_and_x11(self) -> None:
+        with patch("terminal_ielts.app.sys.platform", "darwin"), patch(
+            "terminal_ielts.app.shutil.which", return_value="/usr/bin/pbcopy"
+        ):
+            self.assertEqual(native_clipboard_command(), ["/usr/bin/pbcopy"])
+
+        def linux_which(command: str) -> str | None:
+            return {"wl-copy": "/usr/bin/wl-copy", "xclip": "/usr/bin/xclip"}.get(command)
+
+        with patch("terminal_ielts.app.sys.platform", "linux"), patch.dict(
+            "terminal_ielts.app.os.environ", {"WAYLAND_DISPLAY": "wayland-0"}, clear=True
+        ), patch("terminal_ielts.app.shutil.which", side_effect=linux_which):
+            self.assertEqual(native_clipboard_command(), ["/usr/bin/wl-copy"])
+
+        with patch("terminal_ielts.app.sys.platform", "linux"), patch.dict(
+            "terminal_ielts.app.os.environ", {"DISPLAY": ":0"}, clear=True
+        ), patch("terminal_ielts.app.shutil.which", side_effect=linux_which):
+            self.assertEqual(
+                native_clipboard_command(),
+                ["/usr/bin/xclip", "-selection", "clipboard"],
+            )
+
+        with patch(
+            "terminal_ielts.app.native_clipboard_command",
+            return_value=["/usr/bin/pbcopy"],
+        ), patch("terminal_ielts.app.subprocess.run") as run:
+            self.assertTrue(copy_to_native_clipboard("selected text\nsecond line"))
+            run.assert_called_once_with(
+                ["/usr/bin/pbcopy"],
+                input="selected text\nsecond line",
+                text=True,
+                check=True,
+                timeout=2,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
     async def test_passage_drag_highlights_can_be_clicked_undone_and_cleared(self) -> None:
         bank = load_bank()
         with tempfile.TemporaryDirectory() as directory:
@@ -248,6 +289,8 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(screen.article_highlights[0].parts[0].quote.strip())
                 selected = screen.get_selected_text()
                 self.assertEqual(selected, screen.article_highlights[0].parts[0].quote)
+                self.assertEqual(app.clipboard, selected)
+                app.copy_to_clipboard("reset")
                 await pilot.press("ctrl+c")
                 await pilot.pause()
                 self.assertEqual(app.clipboard, selected)
@@ -293,6 +336,10 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.clipboard, screen.passage_plain_text())
                 self.assertIn("Maori Fish Hooks", app.clipboard)
                 self.assertNotIn("**", app.clipboard)
+                app.copy_to_clipboard("reset")
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                self.assertEqual(app.clipboard, screen.passage_plain_text())
 
     async def test_practice_workspace_switches_single_pane_when_narrow(self) -> None:
         bank = load_bank()

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import random
 import re
+import shutil
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -88,6 +92,42 @@ CJK_BRACKET_RE = re.compile(
     r"|（[^）]*[\u3400-\u4dbf\u4e00-\u9fff][^）]*）"
     r"|【[^】]*[\u3400-\u4dbf\u4e00-\u9fff][^】]*】"
 )
+
+
+def native_clipboard_command() -> list[str] | None:
+    """Return a local system-clipboard command for macOS or Linux."""
+    if sys.platform == "darwin":
+        return [pbcopy] if (pbcopy := shutil.which("pbcopy")) else None
+    if not sys.platform.startswith("linux"):
+        return None
+    if os.environ.get("WAYLAND_DISPLAY") and (wl_copy := shutil.which("wl-copy")):
+        return [wl_copy]
+    if os.environ.get("DISPLAY"):
+        if xclip := shutil.which("xclip"):
+            return [xclip, "-selection", "clipboard"]
+        if xsel := shutil.which("xsel"):
+            return [xsel, "--clipboard", "--input"]
+    return None
+
+
+def copy_to_native_clipboard(text: str) -> bool:
+    """Write text to a local clipboard backend without invoking a shell."""
+    command = native_clipboard_command()
+    if command is None:
+        return False
+    try:
+        subprocess.run(
+            command,
+            input=text,
+            text=True,
+            check=True,
+            timeout=2,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return True
 
 
 def display_exam_title(title: str) -> str:
@@ -840,7 +880,13 @@ class PracticeScreen(Screen[None]):
 
     BINDINGS = [
         Binding("f2", "toggle_pane", "Switch view"),
-        Binding("f3", "copy_passage", "Copy passage"),
+        Binding(
+            "f3,ctrl+g",
+            "copy_passage",
+            "Copy passage",
+            key_display="F3 / Ctrl+G",
+            priority=True,
+        ),
         Binding("ctrl+n", "take_notes", "Take notes", priority=True),
         Binding("ctrl+up", "previous_answer", "Previous answer"),
         Binding("ctrl+down", "next_answer", "Next answer"),
@@ -899,7 +945,7 @@ class PracticeScreen(Screen[None]):
                     yield Static("READING PASSAGE", classes="pane-title")
                     with Horizontal(id="passage-tools"):
                         yield Static(
-                            "Drag to highlight · Ctrl/Cmd+C copies selection",
+                            "Drag to highlight & copy · F3 / Ctrl+G copies passage",
                             id="highlight-help",
                         )
                         yield Button(
@@ -1168,6 +1214,9 @@ class PracticeScreen(Screen[None]):
         self._next_highlight_id += 1
         self.article_highlights.append(highlight)
         self._render_article_highlights()
+        if selected_text := self.get_selected_text():
+            self.app.copy_to_clipboard(selected_text)
+            self.notify("Selection copied")
 
     @on(events.Click)
     def remove_clicked_article_highlight(self, event: events.Click) -> None:
@@ -1197,7 +1246,7 @@ class PracticeScreen(Screen[None]):
 
     def _update_highlight_controls(self) -> None:
         count = len(self.article_highlights)
-        status = "Drag to highlight · Ctrl/Cmd+C copies selection"
+        status = "Drag to highlight & copy · F3 / Ctrl+G copies passage"
         if count:
             status += f"  ·  {count} saved"
         self.query_one("#highlight-help", Static).update(status)
@@ -1619,6 +1668,12 @@ class IELTSApp(App[None]):
             )
         else:
             self.practice_data = load_practice_data(self.data_path)
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy through Textual, plus native macOS/Linux clipboard backends."""
+        super().copy_to_clipboard(text)
+        if not self.is_web and not self.is_headless:
+            copy_to_native_clipboard(text)
 
     @property
     def completed_exam_ids(self) -> set[str]:

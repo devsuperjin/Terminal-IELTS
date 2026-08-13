@@ -32,8 +32,8 @@ complete local source snapshot of
   at a time and the existing bottom Footer entry (or F2) switches Reading/Questions
 - Persistent passage highlights created by mouse drag, with click-to-remove,
   undo-last, and clear-all controls
-- Copy selected passage text with Ctrl/Cmd+C, or copy the complete rendered
-  article as plain text with F3
+- Drag-selected passage text is highlighted and copied immediately; F3 or
+  Ctrl+G copies the complete rendered article as plain text
 - Per-passage notes opened with Ctrl+N and saved independently of submissions
 - Radio buttons for every source single-choice control (including TRUE/FALSE
   and YES/NO), with complete option text; checkboxes for genuine multi-select
@@ -69,7 +69,8 @@ Useful keys:
 - `/` focuses search
 - `Enter` opens the selected passage or moves to the next answer field
 - `F2` switches Reading/Questions in narrow terminals (the Footer entry is clickable)
-- `F3` copies the complete reading passage as plain text
+- `F3` or `Ctrl+G` copies the complete reading passage as plain text (`Fn+F3`
+  may be required when macOS reserves the function key)
 - `Ctrl+N` opens Take Notes; inside the editor, `Ctrl+S` saves and `Escape` cancels
 - `Ctrl+Up` / `Ctrl+Down` move between answer fields
 - `Ctrl+S` submits and scores the passage
@@ -93,6 +94,10 @@ uv run terminal-ielts history-stats
 ```
 
 Inside a paragraph completion editor, `Tab` / `Shift+Tab` moves between blanks.
+
+Clipboard integration uses macOS `pbcopy`; on Linux it supports Wayland
+`wl-copy` and X11 `xclip` or `xsel`, then falls back to the terminal's OSC 52
+clipboard support when no native helper is available.
 
 ## Re-extract the bank
 
