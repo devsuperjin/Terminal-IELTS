@@ -44,6 +44,7 @@ from textual.widgets import (
 from textual.widgets._markdown import MarkdownBlock
 
 from .bank import answer_is_correct
+from .dictionary import E2CDictionary, normalise_word
 from .history import DEFAULT_DATA_PATH, load_practice_data, write_practice_data
 
 
@@ -865,10 +866,83 @@ class NotesScreen(ModalScreen[None]):
             self.action_cancel_note()
 
 
+class DictionaryScreen(ModalScreen[None]):
+    """Keyboard-only English-to-Chinese dictionary lookup."""
+
+    AUTO_FOCUS = "#dictionary-query"
+    BINDINGS = [Binding("escape", "dismiss", "Close", priority=True)]
+
+    def __init__(self, dictionary: E2CDictionary, initial_query: str = "") -> None:
+        super().__init__()
+        self.dictionary = dictionary
+        self.initial_query = initial_query
+
+    def compose(self) -> ComposeResult:
+        with Container(id="dictionary-card"):
+            yield Static("ENGLISH → CHINESE DICTIONARY", classes="eyebrow")
+            yield Input(
+                value=self.initial_query,
+                placeholder="Enter one English word…",
+                id="dictionary-query",
+                select_on_focus=True,
+            )
+            with VerticalScroll(id="dictionary-results"):
+                yield Static("", id="dictionary-word", markup=False)
+                yield Static(
+                    "Type one English word and press Enter.",
+                    id="dictionary-meaning",
+                    markup=False,
+                )
+            yield Static("Enter lookup  ·  Esc close", id="dictionary-help")
+
+    def on_mount(self) -> None:
+        if self.initial_query:
+            self.lookup_word(self.initial_query)
+
+    def lookup_word(self, query: str) -> None:
+        word = self.query_one("#dictionary-word", Static)
+        meaning = self.query_one("#dictionary-meaning", Static)
+        try:
+            result = self.dictionary.lookup(query)
+        except OSError as error:
+            word.update("Dictionary unavailable")
+            meaning.update(str(error))
+            return
+
+        if not result.word:
+            word.update("Invalid query")
+            meaning.update("Enter one English word only.")
+        elif result.found:
+            word.update(result.word)
+            meaning.update(result.meaning or "No definition is available.")
+        else:
+            word.update(result.word)
+            suggestion_text = (
+                "\n\nSuggestions: " + "  ·  ".join(result.suggestions)
+                if result.suggestions
+                else ""
+            )
+            meaning.update("Word not found in the local dictionary." + suggestion_text)
+
+        self.query_one("#dictionary-results", VerticalScroll).scroll_home(animate=False)
+
+    @on(Input.Submitted, "#dictionary-query")
+    def query_submitted(self, event: Input.Submitted) -> None:
+        self.lookup_word(event.value)
+        event.stop()
+
+
 class LibraryScreen(Screen[None]):
     BINDINGS = [
         Binding("/", "focus_search", "Search", show=True),
         Binding("enter", "open_selected", "Practice", show=True),
+        Binding(
+            "f4,ctrl+d",
+            "open_dictionary",
+            "Dictionary",
+            key_display="F4 / Ctrl+D",
+            priority=True,
+        ),
         Binding("r", "random_exam", "Random", show=True),
         Binding("q", "quit", "Quit", show=True),
     ]
@@ -966,6 +1040,9 @@ class LibraryScreen(Screen[None]):
         if self.filtered:
             self.app.start_exam(random.choice(self.filtered)["exam_id"])
 
+    def action_open_dictionary(self) -> None:
+        self.app.open_dictionary()
+
     def action_quit(self) -> None:
         self.app.exit()
 
@@ -976,10 +1053,16 @@ class PracticeScreen(Screen[None]):
     BINDINGS = [
         Binding("f2", "toggle_pane", "Switch view"),
         Binding(
-            "f3,ctrl+g",
-            "copy_passage",
-            "Copy passage",
-            key_display="F3 / Ctrl+G",
+            "ctrl+x",
+            "highlight_selection",
+            "Highlight",
+            priority=True,
+        ),
+        Binding(
+            "f4,ctrl+d",
+            "open_dictionary",
+            "Dictionary",
+            key_display="F4 / Ctrl+D",
             priority=True,
         ),
         Binding("ctrl+n", "take_notes", "Take notes", priority=True),
@@ -1024,6 +1107,7 @@ class PracticeScreen(Screen[None]):
         self._narrow_pane = "passage"
         self._last_answer_index = 0
         self.article_highlights: list[PassageHighlight] = []
+        self._pending_highlight_parts: tuple[PassageHighlightPart, ...] = ()
         self._article_base_content: dict[MarkdownBlock, Content] = {}
         self._next_highlight_id = 1
 
@@ -1040,8 +1124,14 @@ class PracticeScreen(Screen[None]):
                     yield Static("READING PASSAGE", classes="pane-title")
                     with Horizontal(id="passage-tools"):
                         yield Static(
-                            "Drag to highlight · Ctrl+C copies selection · F3 / Ctrl+G copies passage",
+                            "Select text, then click Highlight · Ctrl+X applies",
                             id="highlight-help",
+                        )
+                        yield Button(
+                            "Highlight",
+                            id="highlight-selection",
+                            classes="highlight-action",
+                            disabled=True,
                         )
                         yield Button(
                             "Undo highlight",
@@ -1246,47 +1336,48 @@ class PracticeScreen(Screen[None]):
             )
         )
 
-    def passage_plain_text(self) -> str:
-        """Return the rendered passage as readable plain text."""
+    def selected_passage_word(self) -> str:
+        """Return one selected passage word, rejecting other or multi-word selections."""
+        if not self.selections:
+            return ""
         passage = self.query_one("#passage", Markdown)
-        blocks: list[str] = []
-        for block in passage.query(MarkdownBlock):
-            content = block.content
-            if isinstance(content, Content) and (plain := content.plain.strip()):
-                blocks.append(plain)
-        return "\n\n".join(blocks)
+        if any(
+            widget is not passage and passage not in widget.ancestors
+            for widget in self.selections
+        ):
+            return ""
+        return normalise_word(self.get_selected_text())
 
-    def action_copy_passage(self) -> None:
-        """Copy the full article without Markdown formatting."""
-        text = self.passage_plain_text()
-        if not text:
-            self.notify("Passage text is not ready", severity="warning")
-            return
-        success, error = self.app.copy_to_clipboard(text)
-        if success:
-            self.notify("Passage copied to clipboard")
-        else:
-            self.notify(
-                f"Clipboard unavailable: {error}",
-                severity="warning",
-            )
+    def action_open_dictionary(self) -> None:
+        self.app.open_dictionary(self.selected_passage_word())
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_pane":
             return self._narrow_mode
+        if action == "highlight_selection":
+            # Let Input / TextArea retain their native Ctrl+X when there is no
+            # selected passage range waiting to be highlighted, or while the
+            # user is actively editing an answer.
+            return bool(self._pending_highlight_parts) and not isinstance(
+                self.focused, (Input, TextArea)
+            )
         return super().check_action(action, parameters)
 
     @on(events.TextSelected)
     def passage_text_selected(self) -> None:
-        """Turn the native drag selection inside the passage into persistent spans."""
+        """Cache a passage selection until Highlight or Ctrl+X is activated."""
         if not self.selections:
+            self._pending_highlight_parts = ()
+            self._update_highlight_controls()
             return
         passage = self.query_one("#passage", Markdown)
         if any(
             widget is not passage and passage not in widget.ancestors
             for widget in self.selections
         ):
+            self._pending_highlight_parts = ()
             self.clear_selection()
+            self._update_highlight_controls()
             return
 
         parts: list[PassageHighlightPart] = []
@@ -1306,14 +1397,30 @@ class PracticeScreen(Screen[None]):
                 parts.append(PassageHighlightPart(widget, start, end, quote))
 
         if not parts:
+            self._pending_highlight_parts = ()
             self.clear_selection()
+            self._update_highlight_controls()
+            return
+        self._pending_highlight_parts = tuple(parts)
+        self._update_highlight_controls()
+
+    @on(events.MouseDown, "#highlight-selection")
+    def highlight_button_mouse_down(self) -> None:
+        """Apply before Textual clears the native selection on mouse-up."""
+        self.action_highlight_selection()
+
+    def action_highlight_selection(self) -> None:
+        """Commit the cached passage selection as a persistent highlight."""
+        if not self._pending_highlight_parts:
             return
         highlight = PassageHighlight(
             id=f"highlight-{self._next_highlight_id}",
-            parts=tuple(parts),
+            parts=self._pending_highlight_parts,
         )
         self._next_highlight_id += 1
         self.article_highlights.append(highlight)
+        self._pending_highlight_parts = ()
+        self.clear_selection()
         self._render_article_highlights()
 
     @on(events.Click)
@@ -1344,10 +1451,17 @@ class PracticeScreen(Screen[None]):
 
     def _update_highlight_controls(self) -> None:
         count = len(self.article_highlights)
-        status = "Drag to highlight · Ctrl+C copies selection · F3 / Ctrl+G copies passage"
+        status = (
+            "Selection ready · click Highlight or press Ctrl+X"
+            if self._pending_highlight_parts
+            else "Select text, then click Highlight · Ctrl+X applies"
+        )
         if count:
             status += f"  ·  {count} saved"
         self.query_one("#highlight-help", Static).update(status)
+        self.query_one("#highlight-selection", Button).disabled = not bool(
+            self._pending_highlight_parts
+        )
         self.query_one("#undo-highlight", Button).disabled = count == 0
         self.query_one("#clear-highlights", Button).disabled = count == 0
 
@@ -1369,10 +1483,11 @@ class PracticeScreen(Screen[None]):
         self._render_article_highlights()
 
     def clear_article_highlights(self) -> None:
-        if not self.article_highlights:
+        if not self.article_highlights and not self._pending_highlight_parts:
             self.clear_selection()
             return
         self.article_highlights.clear()
+        self._pending_highlight_parts = ()
         self.clear_selection()
         self._render_article_highlights()
 
@@ -1615,6 +1730,7 @@ class PracticeScreen(Screen[None]):
         actions = {
             "submit": self.action_submit_exam,
             "library-button": self.action_library,
+            "highlight-selection": self.action_highlight_selection,
             "undo-highlight": self.undo_article_highlight,
             "clear-highlights": self.clear_article_highlights,
         }
@@ -1742,6 +1858,30 @@ class IELTSApp(App[None]):
     #notes-editor:focus { border: round $primary; }
     #notes-actions { height: 3; }
     #notes-actions Button { min-width: 14; margin-right: 1; }
+    DictionaryScreen { align: center middle; background: $background-darken-2 78%; }
+    #dictionary-card {
+        width: 92%; max-width: 88; height: 75%; max-height: 30;
+        padding: 1 2; border: round $border; background: $surface;
+    }
+    #dictionary-query {
+        height: 3; margin: 1 0; border: tall $border-blurred;
+        background: $background-darken-1; color: $foreground;
+    }
+    #dictionary-query:focus { border: tall $primary; }
+    #dictionary-results {
+        height: 1fr; padding: 1; border: round $border-blurred;
+        background: $background-darken-1; color: $foreground;
+    }
+    #dictionary-word {
+        width: 1fr; height: auto; min-height: 1; margin-bottom: 1;
+        color: $foreground; text-style: bold; text-wrap: wrap;
+    }
+    #dictionary-meaning {
+        width: 1fr; height: auto; min-height: 1; color: $foreground; text-wrap: wrap;
+    }
+    #dictionary-help {
+        height: 2; padding-top: 1; color: $text-muted; text-align: right;
+    }
     ResultScreen { align: center middle; background: $background-darken-2 78%; }
     #result-card { width: 72; height: 30; padding: 2 3; border: round $border; background: $surface; }
     #score { height: 4; padding-top: 1; color: $foreground; text-style: bold; text-align: center; }
@@ -1755,6 +1895,7 @@ class IELTSApp(App[None]):
         self.theme = UBUNTU_GNOME_THEME.name
         self.bank = bank
         self.exam_by_id = {exam["exam_id"]: exam for exam in bank["exams"]}
+        self.dictionary = E2CDictionary()
         self.data_path = history_path or DEFAULT_DATA_PATH
         self.history_path = self.data_path
         if history_path is None and not self.data_path.exists():
@@ -1791,6 +1932,9 @@ class IELTSApp(App[None]):
     def start_exam(self, exam_id: str) -> None:
         progress = self.practice_data.get("progress", {}).get(exam_id)
         self.push_screen(PracticeScreen(self.exam_by_id[exam_id], progress))
+
+    def open_dictionary(self, initial_query: str = "") -> None:
+        self.push_screen(DictionaryScreen(self.dictionary, initial_query))
 
     def _write_practice_data(self, data: dict[str, Any]) -> bool:
         try:

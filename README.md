@@ -30,10 +30,11 @@ complete local source snapshot of
   scoring, corrections, and local attempt history
 - Responsive practice layout: below 120 columns, one full-width pane is shown
   at a time and the existing bottom Footer entry (or F2) switches Reading/Questions
-- Persistent passage highlights created by mouse drag, with click-to-remove,
-  undo-last, and clear-all controls
-- Drag-selected passage text is highlighted; Ctrl+C copies the current
-  selection, while F3 or Ctrl+G copies the complete rendered article as plain text
+- Persistent passage highlights created by selecting text and then clicking
+  Highlight or pressing Ctrl+X, with click-to-remove, undo-last, and clear-all controls
+- Ctrl+C retains its native behavior and copies only the current text selection
+- A fully local English-to-Chinese dictionary, available from practice with
+  F4 / Ctrl+D or directly from the command line
 - Per-passage notes opened with Ctrl+N and saved independently of submissions
 - Radio buttons for every source single-choice control (including TRUE/FALSE
   and YES/NO), with complete option text; checkboxes for genuine multi-select
@@ -69,8 +70,10 @@ Useful keys:
 - `/` focuses search
 - `Enter` opens the selected passage or moves to the next answer field
 - `F2` switches Reading/Questions in narrow terminals (the Footer entry is clickable)
-- `F3` or `Ctrl+G` copies the complete reading passage as plain text (`Fn+F3`
-  may be required when macOS reserves the function key)
+- `Ctrl+X` highlights the current passage selection; without a pending passage
+  selection, answer fields keep their native cut behavior
+- `Ctrl+C` copies the current text selection
+- `F4` or `Ctrl+D` opens the local dictionary (`Fn+F4` may be required on macOS)
 - `Ctrl+N` opens Take Notes; inside the editor, `Ctrl+S` saves and `Escape` cancels
 - `Ctrl+Up` / `Ctrl+Down` move between answer fields
 - `Ctrl+S` submits and scores the passage
@@ -94,6 +97,35 @@ uv run terminal-ielts history-stats
 ```
 
 Inside a paragraph completion editor, `Tab` / `Shift+Tab` moves between blanks.
+
+## Local dictionary
+
+The included `data/E2Cdictionary.js` provides offline English-to-Chinese
+lookups; no network request is made. During practice, press `F4` or `Ctrl+D`,
+enter one English word, then press `Enter` to look it up. Press `Escape` to
+close the dictionary and return to the passage.
+
+The same dictionary is available without launching the Textual interface:
+
+```bash
+uv run terminal-ielts dictionary apple
+uv run terminal-ielts dictionary woollen
+```
+
+A missing word shows nearby prefix suggestions when available. To query a
+different compatible dictionary file, pass `--data` or set
+`TERMINAL_IELTS_DICTIONARY`:
+
+```bash
+uv run terminal-ielts dictionary appl --data /path/to/E2Cdictionary.js
+TERMINAL_IELTS_DICTIONARY=/path/to/E2Cdictionary.js \
+  uv run terminal-ielts dictionary dictionary
+```
+
+Although the original data file is described as JSON, it uses a JavaScript
+object wrapper. Terminal IELTS follows its `$word:"meaning"` record format as
+UTF-8 text and never executes the file as code. Missing or unreadable files
+produce a clear command-line error.
 
 ## Clipboard
 

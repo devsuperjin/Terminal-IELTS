@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import tempfile
 import time
 import unittest
@@ -10,10 +9,11 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from textual.widgets import Checkbox, Input, RadioButton, RadioSet, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, RadioButton, RadioSet, Select, Static, TextArea
 
 from terminal_ielts.app import (
     CompletionEditor,
+    DictionaryScreen,
     IELTSApp,
     InlineSelectEditor,
     LibraryScreen,
@@ -21,13 +21,14 @@ from terminal_ielts.app import (
     PracticeScreen,
     ResultScreen,
     UBUNTU_GNOME_THEME,
+    _clipboard_commands,
     copy_to_native_clipboard,
     display_exam_title,
     heading_select_options,
-    native_clipboard_command,
     question_is_correct,
 )
 from terminal_ielts.bank import answer_is_correct, load_bank
+from terminal_ielts.dictionary import E2CDictionary
 from terminal_ielts.extractor import normalise_exam, parse_registry_file
 from terminal_ielts.history import (
     DEFAULT_DATA_PATH,
@@ -234,42 +235,94 @@ class ExtractionTests(unittest.TestCase):
 class AppTests(unittest.IsolatedAsyncioTestCase):
     def test_native_clipboard_backends_cover_macos_wayland_and_x11(self) -> None:
         with patch("terminal_ielts.app.sys.platform", "darwin"), patch(
-            "terminal_ielts.app.shutil.which", return_value="/usr/bin/pbcopy"
+            "terminal_ielts.app._find_executable", return_value="/usr/bin/pbcopy"
         ):
-            self.assertEqual(native_clipboard_command(), ["/usr/bin/pbcopy"])
+            self.assertEqual(_clipboard_commands(), [["/usr/bin/pbcopy"]])
 
-        def linux_which(command: str) -> str | None:
+        def linux_executable(command: str) -> str | None:
             return {"wl-copy": "/usr/bin/wl-copy", "xclip": "/usr/bin/xclip"}.get(command)
 
         with patch("terminal_ielts.app.sys.platform", "linux"), patch.dict(
             "terminal_ielts.app.os.environ", {"WAYLAND_DISPLAY": "wayland-0"}, clear=True
-        ), patch("terminal_ielts.app.shutil.which", side_effect=linux_which):
-            self.assertEqual(native_clipboard_command(), ["/usr/bin/wl-copy"])
+        ), patch("terminal_ielts.app._find_executable", side_effect=linux_executable):
+            self.assertEqual(
+                _clipboard_commands(),
+                [["/usr/bin/wl-copy"], ["/usr/bin/xclip", "-selection", "clipboard"]],
+            )
 
         with patch("terminal_ielts.app.sys.platform", "linux"), patch.dict(
             "terminal_ielts.app.os.environ", {"DISPLAY": ":0"}, clear=True
-        ), patch("terminal_ielts.app.shutil.which", side_effect=linux_which):
+        ), patch("terminal_ielts.app._find_executable", side_effect=linux_executable):
             self.assertEqual(
-                native_clipboard_command(),
-                ["/usr/bin/xclip", "-selection", "clipboard"],
+                _clipboard_commands(),
+                [
+                    ["/usr/bin/xclip", "-selection", "clipboard"],
+                    ["/usr/bin/wl-copy"],
+                ],
             )
 
         with patch(
-            "terminal_ielts.app.native_clipboard_command",
-            return_value=["/usr/bin/pbcopy"],
-        ), patch("terminal_ielts.app.subprocess.run") as run:
-            self.assertTrue(copy_to_native_clipboard("selected text\nsecond line"))
-            run.assert_called_once_with(
-                ["/usr/bin/pbcopy"],
-                input="selected text\nsecond line",
-                text=True,
-                check=True,
-                timeout=2,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            "terminal_ielts.app._clipboard_commands",
+            return_value=[["/usr/bin/pbcopy"]],
+        ), patch("terminal_ielts.app.subprocess.Popen") as popen:
+            process = popen.return_value
+            process.returncode = 0
+            success, error = copy_to_native_clipboard("selected text\nsecond line")
+            self.assertTrue(success)
+            self.assertEqual(error, "")
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0], ["/usr/bin/pbcopy"])
+            process.stdin.write.assert_called_once_with(
+                b"selected text\nsecond line"
             )
+            process.stdin.close.assert_called_once_with()
+            process.wait.assert_called_once_with(timeout=2)
 
-    async def test_passage_drag_highlights_can_be_clicked_undone_and_cleared(self) -> None:
+    async def test_dictionary_opens_from_library_and_selected_passage_word(self) -> None:
+        bank = load_bank()
+        with tempfile.TemporaryDirectory() as directory:
+            dictionary_path = Path(directory) / "E2Cdictionary.js"
+            dictionary_path.write_text('$maori:"毛利人的",\n', encoding="utf-8")
+            app = IELTSApp(bank, Path(directory) / "history.jsonl")
+            app.dictionary = E2CDictionary(dictionary_path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                await pilot.press("f4")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, DictionaryScreen)
+                self.assertTrue(app.screen.query_one("#dictionary-query", Input).has_focus)
+
+                await pilot.press("escape")
+                await pilot.pause()
+                app.start_exam("p1-low-02")
+                await pilot.pause()
+                practice = app.screen
+                paragraph = next(
+                    paragraph
+                    for paragraph in practice.query("#passage MarkdownParagraph")
+                    if "maori" in paragraph.content.plain.casefold()
+                )
+                text = paragraph.content.plain
+                start = text.casefold().index("maori")
+                await pilot.mouse_down(paragraph, offset=(start, 0))
+                await pilot.hover(paragraph, offset=(start + len("Maori"), 0))
+                await pilot.mouse_up(paragraph, offset=(start + len("Maori"), 0))
+                await pilot.pause()
+                self.assertEqual(practice.selected_passage_word(), "maori")
+
+                await pilot.press("ctrl+d")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, DictionaryScreen)
+                self.assertEqual(
+                    app.screen.query_one("#dictionary-query", Input).value,
+                    "maori",
+                )
+                self.assertEqual(
+                    str(app.screen.query_one("#dictionary-word", Static).render()),
+                    "maori",
+                )
+
+    async def test_passage_selection_requires_explicit_highlight_and_can_be_removed(self) -> None:
         bank = load_bank()
         with tempfile.TemporaryDirectory() as directory:
             app = IELTSApp(bank, Path(directory) / "history.jsonl")
@@ -285,14 +338,25 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.hover(paragraph, offset=(12, 0))
                 await pilot.mouse_up(paragraph, offset=(12, 0))
                 await pilot.pause()
-                self.assertEqual(len(screen.article_highlights), 1)
-                self.assertTrue(screen.article_highlights[0].parts[0].quote.strip())
+                self.assertEqual(screen.article_highlights, [])
+                self.assertTrue(screen._pending_highlight_parts)
+                self.assertFalse(
+                    screen.query_one("#highlight-selection", Button).disabled
+                )
                 selected = screen.get_selected_text()
-                self.assertEqual(selected, screen.article_highlights[0].parts[0].quote)
+                self.assertEqual(selected, screen._pending_highlight_parts[0].quote)
                 self.assertEqual(app.clipboard, "")
                 await pilot.press("ctrl+c")
                 await pilot.pause()
                 self.assertEqual(app.clipboard, selected)
+
+                await pilot.click("#highlight-selection")
+                await pilot.pause()
+                self.assertEqual(len(screen.article_highlights), 1)
+                self.assertFalse(screen._pending_highlight_parts)
+                self.assertTrue(
+                    screen.query_one("#highlight-selection", Button).disabled
+                )
                 highlight_id = screen.article_highlights[0].id
                 self.assertTrue(
                     any(
@@ -318,10 +382,16 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(screen.article_highlights, [])
                 self.assertEqual(paragraph.content, base_content)
 
-                for start, end in ((0, 8), (15, 24)):
+                for index, (start, end) in enumerate(((0, 8), (15, 24))):
                     await pilot.mouse_down(paragraph, offset=(start, 0))
                     await pilot.hover(paragraph, offset=(end, 0))
                     await pilot.mouse_up(paragraph, offset=(end, 0))
+                    await pilot.pause()
+                    self.assertEqual(len(screen.article_highlights), index)
+                    if index == 0:
+                        await pilot.click("#highlight-selection")
+                    else:
+                        await pilot.press("ctrl+x")
                     await pilot.pause()
                 self.assertEqual(len(screen.article_highlights), 2)
                 screen.undo_article_highlight()
@@ -330,15 +400,33 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(screen.article_highlights, [])
                 self.assertEqual(paragraph.content, base_content)
 
-                await pilot.press("f3")
+    async def test_ctrl_x_keeps_native_input_cut_even_with_pending_passage_selection(self) -> None:
+        bank = load_bank()
+        with tempfile.TemporaryDirectory() as directory:
+            app = IELTSApp(bank, Path(directory) / "state.json")
+            async with app.run_test(size=(120, 40)) as pilot:
                 await pilot.pause()
-                self.assertEqual(app.clipboard, screen.passage_plain_text())
-                self.assertIn("Maori Fish Hooks", app.clipboard)
-                self.assertNotIn("**", app.clipboard)
-                app.copy_to_clipboard("reset")
-                await pilot.press("ctrl+g")
+                app.start_exam("p1-high-211")
                 await pilot.pause()
-                self.assertEqual(app.clipboard, screen.passage_plain_text())
+                screen = app.screen
+                self.assertIsInstance(screen, PracticeScreen)
+
+                paragraph = screen.query("#passage MarkdownParagraph").first()
+                await pilot.mouse_down(paragraph, offset=(0, 0))
+                await pilot.hover(paragraph, offset=(8, 0))
+                await pilot.mouse_up(paragraph, offset=(8, 0))
+                await pilot.pause()
+                self.assertTrue(screen._pending_highlight_parts)
+
+                answer_input = screen.query_one("#answer-4", Input)
+                answer_input.value = "cut this answer"
+                answer_input.focus()
+                answer_input.select_all()
+                await pilot.press("ctrl+x")
+                await pilot.pause()
+
+                self.assertEqual(answer_input.value, "")
+                self.assertEqual(screen.article_highlights, [])
 
     async def test_practice_workspace_switches_single_pane_when_narrow(self) -> None:
         bank = load_bank()
