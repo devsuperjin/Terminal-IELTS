@@ -246,7 +246,11 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(len(screen.article_highlights), 1)
                 self.assertTrue(screen.article_highlights[0].parts[0].quote.strip())
-                self.assertEqual(screen.selections, {})
+                selected = screen.get_selected_text()
+                self.assertEqual(selected, screen.article_highlights[0].parts[0].quote)
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                self.assertEqual(app.clipboard, selected)
                 highlight_id = screen.article_highlights[0].id
                 self.assertTrue(
                     any(
@@ -283,6 +287,12 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 screen.clear_article_highlights()
                 self.assertEqual(screen.article_highlights, [])
                 self.assertEqual(paragraph.content, base_content)
+
+                await pilot.press("f3")
+                await pilot.pause()
+                self.assertEqual(app.clipboard, screen.passage_plain_text())
+                self.assertIn("Maori Fish Hooks", app.clipboard)
+                self.assertNotIn("**", app.clipboard)
 
     async def test_practice_workspace_switches_single_pane_when_narrow(self) -> None:
         bank = load_bank()

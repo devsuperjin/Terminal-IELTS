@@ -840,6 +840,7 @@ class PracticeScreen(Screen[None]):
 
     BINDINGS = [
         Binding("f2", "toggle_pane", "Switch view"),
+        Binding("f3", "copy_passage", "Copy passage"),
         Binding("ctrl+n", "take_notes", "Take notes", priority=True),
         Binding("ctrl+up", "previous_answer", "Previous answer"),
         Binding("ctrl+down", "next_answer", "Next answer"),
@@ -897,7 +898,10 @@ class PracticeScreen(Screen[None]):
                 with Vertical(classes="pane", id="passage-pane"):
                     yield Static("READING PASSAGE", classes="pane-title")
                     with Horizontal(id="passage-tools"):
-                        yield Static("Drag over passage text to highlight", id="highlight-help")
+                        yield Static(
+                            "Drag to highlight · Ctrl/Cmd+C copies selection",
+                            id="highlight-help",
+                        )
                         yield Button(
                             "Undo highlight",
                             id="undo-highlight",
@@ -1101,6 +1105,25 @@ class PracticeScreen(Screen[None]):
             )
         )
 
+    def passage_plain_text(self) -> str:
+        """Return the rendered passage as readable plain text."""
+        passage = self.query_one("#passage", Markdown)
+        blocks: list[str] = []
+        for block in passage.query(MarkdownBlock):
+            content = block.content
+            if isinstance(content, Content) and (plain := content.plain.strip()):
+                blocks.append(plain)
+        return "\n\n".join(blocks)
+
+    def action_copy_passage(self) -> None:
+        """Copy the full article without Markdown formatting."""
+        text = self.passage_plain_text()
+        if not text:
+            self.notify("Passage text is not ready", severity="warning")
+            return
+        self.app.copy_to_clipboard(text)
+        self.notify("Passage copied · if paste is empty, use terminal-native copy")
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_pane":
             return self._narrow_mode
@@ -1135,8 +1158,8 @@ class PracticeScreen(Screen[None]):
             if quote.strip():
                 parts.append(PassageHighlightPart(widget, start, end, quote))
 
-        self.clear_selection()
         if not parts:
+            self.clear_selection()
             return
         highlight = PassageHighlight(
             id=f"highlight-{self._next_highlight_id}",
@@ -1174,7 +1197,7 @@ class PracticeScreen(Screen[None]):
 
     def _update_highlight_controls(self) -> None:
         count = len(self.article_highlights)
-        status = "Drag over passage text to highlight"
+        status = "Drag to highlight · Ctrl/Cmd+C copies selection"
         if count:
             status += f"  ·  {count} saved"
         self.query_one("#highlight-help", Static).update(status)
